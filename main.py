@@ -27,9 +27,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ZAPI_API_URL = os.getenv("ZAPI_API_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
-ZAPI_CLIENT_TOKEN = os.getenv("ZAPI_CLIENT_TOKEN") # Carregando o novo token
+ZAPI_CLIENT_TOKEN = os.getenv("ZAPI_CLIENT_TOKEN")
 
-# Adicionando o novo token à verificação de segurança
 if not all([DATABASE_URL, OPENAI_API_KEY, ZAPI_API_URL, ZAPI_INSTANCE_ID, ZAPI_TOKEN, ZAPI_CLIENT_TOKEN]):
     raise ValueError("Verifique seu arquivo .env, uma ou mais variáveis de ambiente não foram definidas.")
 
@@ -144,9 +143,9 @@ app = FastAPI(
 @app.on_event("startup")
 def on_startup():
     """Executa ao iniciar a API para criar as tabelas do banco."""
-    print("Iniciando API e criando tabelas do banco de dados...")
+    print("Iniciando API e criando tabelas do banco de dados...", flush=True)
     criar_tabelas_db()
-    print("Tabelas prontas.")
+    print("Tabelas prontas.", flush=True)
 
 @app.get("/")
 def health_check():
@@ -167,82 +166,36 @@ available_functions = {
 }
 
 tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "agendar_consulta",
-            "description": "Agenda uma consulta. Sempre confirme o procedimento e data/hora.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "data_hora_agendamento": {
-                        "type": "string",
-                        "description": "Data e hora no formato 'YYYY-MM-DD HH:MM'."
-                    },
-                    "procedimento": {
-                        "type": "string",
-                        "description": "Procedimento a ser agendado (ex: 'limpeza')."
-                    }
-                },
-                "required": ["data_hora_agendamento", "procedimento"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "consultar_meus_agendamentos",
-            "description": "Consulta os agendamentos futuros do paciente.",
-            "parameters": {"type": "object", "properties": {}}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "cancelar_agendamento",
-            "description": "Cancela um agendamento. Se necessário, liste-os antes.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "id_agendamento": {
-                        "type": "integer",
-                        "description": "O ID numérico do agendamento a ser cancelado."
-                    }
-                },
-                "required": ["id_agendamento"]
-            }
-        }
-    }
+    {"type": "function", "function": {"name": "agendar_consulta", "description": "Agenda uma consulta.", "parameters": {"type": "object", "properties": {"data_hora_agendamento": {"type": "string", "description": "Data/hora no formato 'YYYY-MM-DD HH:MM'."}, "procedimento": {"type": "string", "description": "Procedimento a agendar."}}, "required": ["data_hora_agendamento", "procedimento"]}}},
+    {"type": "function", "function": {"name": "consultar_meus_agendamentos", "description": "Consulta agendamentos futuros.", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "cancelar_agendamento", "description": "Cancela um agendamento por ID.", "parameters": {"type": "object", "properties": {"id_agendamento": {"type": "integer", "description": "ID do agendamento."}}, "required": ["id_agendamento"]}}}
 ]
 
 async def enviar_resposta_whatsapp(telefone: str, mensagem: str):
     """Envia uma mensagem de texto para um número de telefone via Z-API."""
+    print(f"-> INICIANDO ENVIO PARA Z-API: {mensagem}", flush=True)
     url = f"{ZAPI_API_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     payload = {"phone": telefone, "message": mensagem}
-    
-    headers = {
-        "Content-Type": "application/json",
-        "Client-Token": ZAPI_CLIENT_TOKEN
-    }
-    
+    headers = {"Content-Type": "application/json", "Client-Token": ZAPI_CLIENT_TOKEN}
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
-            print(f"Resposta enviada com sucesso para {telefone}.")
+            print(f"-> RESPOSTA ENVIADA COM SUCESSO PARA {telefone}.", flush=True)
         except httpx.HTTPStatusError as exc:
-            print(f"Erro ao enviar para Z-API: {exc.response.status_code} - {exc.response.text}")
+            print(f"-> ERRO HTTP AO ENVIAR PARA Z-API: {exc.response.status_code} - {exc.response.text}", flush=True)
         except Exception as exc:
-            print(f"Erro inesperado ao chamar a Z-API: {exc}")
+            print(f"-> ERRO INESPERADO AO CHAMAR Z-API: {exc}", flush=True)
 
 @app.post("/whatsapp/webhook")
 async def whatsapp_webhook(payload: ZapiWebhookPayload, db: Session = Depends(get_db)):
     """Recebe, processa e responde mensagens do WhatsApp."""
+    print("-> WEBHOOK RECEBIDO", flush=True)
     telefone_usuario, mensagem_usuario = payload.phone, payload.text
     if not mensagem_usuario:
         return {"status": "ignorado", "motivo": "sem mensagem de texto"}
 
-    print(f"Mensagem recebida de {telefone_usuario}: '{mensagem_usuario}'")
+    print(f"-> MENSAGEM DE {telefone_usuario}: '{mensagem_usuario}'", flush=True)
     messages = [
         {"role": "system", "content": "Você é um atendente da 'Clínica Odonto Feliz'. Hoje é "
                                       f"{datetime.now().strftime('%d/%m/%Y')}. Use as ferramentas "
@@ -251,37 +204,37 @@ async def whatsapp_webhook(payload: ZapiWebhookPayload, db: Session = Depends(ge
     ]
 
     try:
+        print("-> CHAMANDO OPENAI...", flush=True)
         response = openai.chat.completions.create(
-            model="gpt-4-turbo-preview", messages=messages, tools=tools, tool_choice="auto"
+            model="gpt-3.5-turbo", messages=messages, tools=tools, tool_choice="auto"
         )
         response_message = response.choices[0].message
         messages.append(response_message)
+        print("-> OPENAI RESPONDEU. Verificando se há ferramentas...", flush=True)
 
         while response_message.tool_calls:
+            print(f"-> IA SOLICITOU FERRAMENTA: {response_message.tool_calls[0].function.name}", flush=True)
             for tool_call in response_message.tool_calls:
                 function_name = tool_call.function.name
                 function_to_call = available_functions.get(function_name)
-                if not function_to_call:
-                    raise HTTPException(500, f"Função inválida: {function_name}")
-
+                if not function_to_call: raise HTTPException(500, f"Função inválida: {function_name}")
                 function_args = json.loads(tool_call.function.arguments)
                 function_args.update({"telefone_paciente": telefone_usuario, "db": db})
-
                 function_response = function_to_call(**function_args)
-                messages.append({
-                    "tool_call_id": tool_call.id, "role": "tool",
-                    "name": function_name, "content": function_response
-                })
-
-            second_response = openai.chat.completions.create(model="gpt-4-turbo", messages=messages)
+                messages.append({"tool_call_id": tool_call.id, "role": "tool", "name": function_name, "content": function_response})
+            
+            print("-> RE-CHAMANDO OPENAI COM RESULTADO DA FERRAMENTA...", flush=True)
+            second_response = openai.chat.completions.create(model="gpt-3.5-turbo", messages=messages)
             response_message = second_response.choices[0].message
             messages.append(response_message)
+            print("-> OPENAI GEROU RESPOSTA FINAL.", flush=True)
 
         resposta_final = response_message.content
 
     except Exception as e:
-        print(f"Erro no processamento da IA: {e}")
+        print(f"-> ERRO NO BLOCO TRY/EXCEPT DA IA: {e}", flush=True)
         resposta_final = "Desculpe, ocorreu um problema técnico. Tente novamente mais tarde."
 
     await enviar_resposta_whatsapp(telefone_usuario, resposta_final)
+    print("-> PROCESSAMENTO DO WEBHOOK CONCLUÍDO.", flush=True)
     return {"status": "processado", "resposta_enviada": resposta_final}
