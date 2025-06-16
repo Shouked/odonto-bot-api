@@ -1,0 +1,7 @@
+ # Arquivo com chaves secretas
+ .env*
+ 
+ # Cache do Python
+ __pycache__/
+ *.pyc
+ ```
