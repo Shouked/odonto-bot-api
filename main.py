@@ -1,5 +1,8 @@
 """
 API principal do OdontoBot AI. Versão Final para Demonstração.
+
+FastAPI que serve de webhook para a Z-API, processa mensagens de WhatsApp via
+OpenAI e interage com o banco para gerenciar pacientes e agendamentos.
 """
 
 import os, json, asyncio, re
@@ -9,7 +12,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, Response, Request
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Text, and_
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Text, and_, Float
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
 from collections import defaultdict
 
@@ -43,16 +46,29 @@ Base = declarative_base()
 class Paciente(Base): __tablename__ = "pacientes"; id, nome, telefone = Column(Integer, primary_key=True), Column(String), Column(String, unique=True, nullable=False); agendamentos = relationship("Agendamento", back_populates="paciente", cascade="all, delete-orphan"); historico = relationship("HistoricoConversa", back_populates="paciente", cascade="all, delete-orphan")
 class Agendamento(Base): __tablename__ = "agendamentos"; id, paciente_id = Column(Integer, primary_key=True), Column(Integer, ForeignKey("pacientes.id"), nullable=False); data_hora, procedimento, status = Column(DateTime, nullable=False), Column(String, nullable=False), Column(String, default="confirmado"); paciente = relationship("Paciente", back_populates="agendamentos")
 class HistoricoConversa(Base): __tablename__ = "historico_conversas"; id, paciente_id = Column(Integer, primary_key=True), Column(Integer, ForeignKey("pacientes.id"), nullable=False); role, content, timestamp = Column(String, nullable=False), Column(Text, nullable=False), Column(DateTime, default=datetime.utcnow); paciente = relationship("Paciente", back_populates="historico")
-class Procedimento(Base): __tablename__ = "procedimentos"; id = Column(Integer, primary_key=True); nome = Column(String, unique=True, nullable=False); categoria = Column(String, index=True); valor_descritivo = Column(String, nullable=False)
+# [ATUALIZADO] Tabela de Procedimentos com valor base
+class Procedimento(Base):
+    __tablename__ = "procedimentos"
+    id = Column(Integer, primary_key=True)
+    nome = Column(String, unique=True, nullable=False)
+    categoria = Column(String, index=True)
+    valor_descritivo = Column(String, nullable=False)
+    valor_base = Column(Float, nullable=True) # Nova coluna para o preço inicial
+
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 def get_db(): db = SessionLocal();_ = db;yield db;db.close()
 def criar_tabelas(): Base.metadata.create_all(bind=engine)
+# [ATUALIZADO] Função para popular a tabela de procedimentos com valor base
 def popular_procedimentos_iniciais(db: Session):
     if db.query(Procedimento).first(): return
-    print("Populando tabela de procedimentos pela primeira vez...", flush=True)
+    print("Populando tabela de procedimentos com valores base...", flush=True)
     procedimentos_data = [{"categoria": "Procedimentos Básicos", "nome": "Consulta diagnóstica", "valor": "R$100 a R$162"}, {"categoria": "Radiografias", "nome": "Raio-X periapical ou bite-wing", "valor": "R$15 a R$34"}, {"categoria": "Radiografias", "nome": "Raio-X Panorâmica", "valor": "R$57 a R$115"}, {"categoria": "Procedimentos Básicos", "nome": "Limpeza simples (Profilaxia)", "valor": "R$100 a R$400"}, {"categoria": "Restaurações (Obturações)", "nome": "Restauração de Resina (1 face)", "valor": "a partir de R$100"}, {"categoria": "Restaurações (Obturações)", "nome": "Restauração de Resina (2 faces)", "valor": "a partir de R$192"}, {"categoria": "Endodontia (Canal)", "nome": "Tratamento de Canal (Incisivo/Canino)", "valor": "R$517 a R$630"}, {"categoria": "Endodontia (Canal)", "nome": "Tratamento de Canal (Pré-molar/Molar)", "valor": "R$432 a R$876"}, {"categoria": "Exodontia (Procedimentos Cirúrgicos)", "nome": "Extração simples de dente permanente", "valor": "R$150 a R$172"}, {"categoria": "Exodontia (Procedimentos Cirúrgicos)", "nome": "Extração de dente de leite", "valor": "R$96 a R$102"}, {"categoria": "Exodontia (Procedimentos Cirúrgicos)", "nome": "Extração de dente incluso/impactado", "valor": "R$364 a R$390"}, {"categoria": "Próteses e Coroas", "nome": "Coroa provisória", "valor": "R$150 a R$268"}, {"categoria": "Próteses e Coroas", "nome": "Coroa metalo-cerâmica", "valor": "R$576 a R$600"}, {"categoria": "Próteses e Coroas", "nome": "Coroa cerâmica pura", "valor": "R$576 a R$605"}, {"categoria": "Clareamento Dentário", "nome": "Clareamento caseiro (por arcada)", "valor": "R$316 a R$330"}, {"categoria": "Clareamento Dentário", "nome": "Clareamento em consultório (por arcada)", "valor": "R$316 a R$330"}, {"categoria": "Implantes e Cirurgias Ósseas", "nome": "Implante dentário unitário", "valor": "a partir de R$576"}, {"categoria": "Implantes e Cirurgias Ósseas", "nome": "Enxertos ósseos", "valor": "R$200 a R$800"}, {"categoria": "Implantes e Cirurgias Ósseas", "nome": "Levantamento de seio maxilar", "valor": "R$576 a R$800"}]
-    for p_data in procedimentos_data: db.add(Procedimento(nome=p_data["nome"], categoria=p_data["categoria"], valor_descritivo=p_data["valor"]))
+    for p_data in procedimentos_data:
+        # Extrai o primeiro número da string de valor para ser o valor_base
+        numeros = re.findall(r'\d+', p_data["valor"])
+        valor_base = float(numeros[0]) if numeros else None
+        db.add(Procedimento(nome=p_data["nome"], categoria=p_data["categoria"], valor_descritivo=p_data["valor"], valor_base=valor_base))
     db.commit()
 
 # ───────────────── 4. FERRAMENTAS ──────────────────────────── #
@@ -63,9 +79,9 @@ def buscar_ou_criar_paciente(db: Session, tel: str) -> Paciente:
 def agendar_consulta(db: Session, telefone_paciente: str, data_hora_agendamento: str, procedimento: str) -> str:
     try: dt = datetime.strptime(data_hora_agendamento, "%Y-%m-%d %H:%M")
     except ValueError: return "Formato de data/hora inválido. Use AAAA-MM-DD HH:MM."
-    if dt < datetime.now(): return f"Não é possível agendar no passado."
-    if dt.weekday() >= 5: return f"A clínica não funciona aos fins de semana."
-    if not (9 <= dt.hour < 18): return f"O horário de funcionamento é das 09:00 às 18:00."
+    if dt < datetime.now(): return "Não é possível agendar no passado."
+    if dt.weekday() >= 5: return "A clínica não funciona aos fins de semana."
+    if not (9 <= dt.hour < 18): return "O horário de funcionamento é das 09:00 às 18:00."
     pac = buscar_ou_criar_paciente(db, telefone_paciente); db.add(Agendamento(paciente_id=pac.id, data_hora=dt, procedimento=procedimento)); db.commit()
     return f"Perfeito! Agendamento para '{procedimento}' confirmado para {dt.strftime('%d/%m/%Y às %H:%M')}."
 def consultar_meus_agendamentos(db: Session, telefone_paciente: str) -> str:
@@ -82,11 +98,11 @@ def consultar_e_reagendar_inteligente(db: Session, telefone_paciente: str, novo_
     ag_reagendar = ags[0]
     try: nova_dt = datetime.strptime(novo_data_hora_agendamento, "%Y-%m-%d %H:%M")
     except ValueError: return "O formato da nova data e hora é inválido. Use AAAA-MM-DD HH:MM."
-    if nova_dt < datetime.now(): return f"Não é possível reagendar para o passado."
-    if nova_dt.weekday() >= 5: return f"A clínica não funciona aos fins de semana."
-    if not (9 <= nova_dt.hour < 18): return f"O horário de funcionamento é das 09:00 às 18:00."
+    if nova_dt < datetime.now(): return "Não é possível reagendar para o passado."
+    if nova_dt.weekday() >= 5: return "A clínica não funciona aos fins de semana."
+    if not (9 <= nova_dt.hour < 18): return "O horário de funcionamento é das 09:00 às 18:00."
     id_antigo = ag_reagendar.id; ag_reagendar.data_hora = nova_dt; db.commit()
-    return f"Pronto! Seu agendamento (ID {id_antigo}) foi reagendado para {nova_dt.strftime('%d/%m/%Y às %H:%M')}."
+    return f"Pronto! Seu agendamento (ID {id_antigo}) foi reagendado com sucesso para {nova_dt.strftime('%d/%m/%Y às %H:%M')}."
 def consultar_e_cancelar_inteligente(db: Session, telefone_paciente: str) -> str:
     pac = buscar_ou_criar_paciente(db, telefone_paciente)
     ags = db.query(Agendamento).filter(Agendamento.paciente_id == pac.id, Agendamento.data_hora >= datetime.now(), Agendamento.status == "confirmado").all()
@@ -103,22 +119,22 @@ def listar_todos_os_procedimentos(db: Session, telefone_paciente: str) -> str:
     for categoria, nomes in categorias.items():
         resposta += f"*{categoria}*\n";_ = [resposta := resposta + f"- {nome}\n" for nome in nomes];resposta += "\n"
     return resposta
-# [BLINDADO] Busca por preços agora é muito mais robusta.
+# [BLINDADO] Ferramenta de preços com lógica inequívoca
 def consultar_precos_procedimentos(db: Session, telefone_paciente: str, termo_busca: str) -> str:
-    """Consulta o preço de um ou mais procedimentos com base em palavras-chave."""
-    # Normaliza o termo de busca: remove acentos, hífens e passa para minúsculas.
     termo_normalizado = re.sub(r'[-.,]', ' ', termo_busca.lower())
     palavras_chave = termo_normalizado.split()
-    
-    # Constrói uma query que busca por TODAS as palavras-chave no nome do procedimento.
     filtros = [Procedimento.nome.ilike(f'%{palavra}%') for palavra in palavras_chave]
     resultados = db.query(Procedimento).filter(and_(*filtros)).all()
-    
     if not resultados:
         return f"Não encontrei informações de valores para '{termo_busca}'. Verifique se o nome está correto ou peça a lista completa de procedimentos."
     
-    linhas = [f"- {r.nome}: {r.valor_descritivo}" for r in resultados]
-    return f"Encontrei os seguintes valores para '{termo_busca}':\n" + "\n".join(linhas)
+    respostas = []
+    for r in resultados:
+        if r.valor_base:
+            respostas.append(f"O valor para {r.nome} é a partir de R$ {int(r.valor_base):,}.00".replace(",", "."))
+        else:
+            respostas.append(f"Para {r.nome}, o valor é {r.valor_descritivo}")
+    return "\n".join(respostas)
 
 available_functions = {"agendar_consulta": agendar_consulta, "consultar_meus_agendamentos": consultar_meus_agendamentos, "consultar_e_cancelar_inteligente": consultar_e_cancelar_inteligente, "consultar_e_reagendar_inteligente": consultar_e_reagendar_inteligente, "listar_todos_os_procedimentos": listar_todos_os_procedimentos, "consultar_precos_procedimentos": consultar_precos_procedimentos}
 tools = [{"type": "function", "function": {"name": "agendar_consulta", "description": "Agenda uma nova consulta.", "parameters": {"type": "object", "properties": {"data_hora_agendamento": {"type": "string"}, "procedimento": {"type": "string"}}, "required": ["data_hora_agendamento", "procedimento"]}}},
@@ -129,7 +145,7 @@ tools = [{"type": "function", "function": {"name": "agendar_consulta", "descript
          {"type": "function", "function": {"name": "consultar_precos_procedimentos", "description": "Consulta preços de procedimentos. Use quando o usuário perguntar 'quanto custa', 'valor', 'preço'.", "parameters": {"type": "object", "properties": {"termo_busca": {"type": "string", "description": "O procedimento que o usuário quer saber o preço."}}, "required": ["termo_busca"]}}}]
 
 # ───────────────── 5. APP FASTAPI ───────────────────────────── #
-app = FastAPI(title="OdontoBot AI", description="Automação de WhatsApp com OpenRouter e Whisper.", version="4.3.0-demo-final")
+app = FastAPI(title="OdontoBot AI", description="Automação de WhatsApp para DI DONATO ODONTO.", version="5.0.0-demo")
 @app.on_event("startup")
 async def startup_event():
     await asyncio.to_thread(criar_tabelas)
@@ -176,7 +192,8 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
     NOME_CLINICA, PROFISSIONAL = "DI DONATO ODONTO", "Dra. Valéria Cristina Di Donato"
     system_prompt = (f"Você é OdontoBot, assistente virtual da {NOME_CLINICA}, onde os atendimentos são realizados pela {PROFISSIONAL}. "
                      f"Seja sempre educado, prestativo e conciso. Hoje é {datetime.now().strftime('%d/%m/%Y')}. "
-                     "Use as ferramentas para responder. Se pedirem conselhos médicos, recuse educadamente e diga que apenas a doutora pode fornecer essa orientação na consulta.")
+                     "Use as ferramentas para responder. Ao informar preços, sempre diga que o valor é 'a partir de' e que o valor final será confirmado pela doutora na avaliação. "
+                     "Se pedirem conselhos médicos, recuse educadamente e diga que apenas a doutora pode fornecer essa orientação na consulta.")
     
     mensagens_para_ia: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
     for msg in historico_recente: mensagens_para_ia.append({"role": msg.role, "content": msg.content})
