@@ -38,12 +38,12 @@ try:
 except ImportError as exc:
     raise RuntimeError("Pacote 'openai' não instalado.") from exc
 
-# ───────────────── 3. BANCO DE DADOS (COM PACIENTE ATUALIZADO) ── #
+# ───────────────── 3. BANCO DE DADOS ───────────────────────── #
 Base = declarative_base()
 class Paciente(Base):
     __tablename__ = "pacientes"
     id = Column(Integer, primary_key=True)
-    nome_completo = Column(String, nullable=True) # Alterado de 'nome'
+    nome_completo = Column(String, nullable=True)
     telefone = Column(String, unique=True, nullable=False)
     endereco = Column(String, nullable=True)
     email = Column(String, nullable=True)
@@ -62,33 +62,25 @@ def popular_procedimentos_iniciais(db: Session):
     if db.query(Procedimento).first(): return
     print("Populando tabela de procedimentos com valores base...", flush=True)
     procedimentos_data = [{"categoria": "Procedimentos Básicos", "nome": "Consulta diagnóstica", "valor": "R$100 a R$162"}, {"categoria": "Radiografias", "nome": "Raio-X periapical ou bite-wing", "valor": "R$15 a R$34"}, {"categoria": "Radiografias", "nome": "Raio-X Panorâmica", "valor": "R$57 a R$115"}, {"categoria": "Procedimentos Básicos", "nome": "Limpeza simples (Profilaxia)", "valor": "R$100 a R$400"}, {"categoria": "Restaurações (Obturações)", "nome": "Restauração de Resina (1 face)", "valor": "a partir de R$100"}, {"categoria": "Restaurações (Obturações)", "nome": "Restauração de Resina (2 faces)", "valor": "a partir de R$192"}, {"categoria": "Endodontia (Canal)", "nome": "Tratamento de Canal (Incisivo/Canino)", "valor": "R$517 a R$630"}, {"categoria": "Endodontia (Canal)", "nome": "Tratamento de Canal (Pré-molar/Molar)", "valor": "R$432 a R$876"}, {"categoria": "Exodontia (Procedimentos Cirúrgicos)", "nome": "Extração simples de dente permanente", "valor": "R$150 a R$172"}, {"categoria": "Exodontia (Procedimentos Cirúrgicos)", "nome": "Extração de dente de leite", "valor": "R$96 a R$102"}, {"categoria": "Exodontia (Procedimentos Cirúrgicos)", "nome": "Extração de dente incluso/impactado", "valor": "R$364 a R$390"}, {"categoria": "Próteses e Coroas", "nome": "Coroa provisória", "valor": "R$150 a R$268"}, {"categoria": "Próteses e Coroas", "nome": "Coroa metalo-cerâmica", "valor": "R$576 a R$600"}, {"categoria": "Próteses e Coroas", "nome": "Coroa cerâmica pura", "valor": "R$576 a R$605"}, {"categoria": "Clareamento Dentário", "nome": "Clareamento caseiro (por arcada)", "valor": "R$316 a R$330"}, {"categoria": "Clareamento Dentário", "nome": "Clareamento em consultório (por arcada)", "valor": "R$316 a R$330"}, {"categoria": "Implantes e Cirurgias Ósseas", "nome": "Implante dentário unitário", "valor": "a partir de R$576"}, {"categoria": "Implantes e Cirurgias Ósseas", "nome": "Enxertos ósseos", "valor": "R$200 a R$800"}, {"categoria": "Implantes e Cirurgias Ósseas", "nome": "Levantamento de seio maxilar", "valor": "R$576 a R$800"}]
-    for p_data in procedimentos_data: numeros = re.findall(r'\d+', p_data["valor"]); valor_base = float(numeros[0]) if numeros else None; db.add(Procedimento(nome=p_data["nome"], categoria=p_data["categoria"], valor_descritivo=p_data["valor"], valor_base=valor_base))
+    for p_data in procedimentos_data:
+        numeros = re.findall(r'\d+', p_data["valor"])
+        valor_base = float(numeros[0]) if numeros else None
+        db.add(Procedimento(nome=p_data["nome"], categoria=p_data["categoria"], valor_descritivo=p_data["valor"], valor_base=valor_base))
     db.commit()
 
-# ───────────────── 4. FERRAMENTAS (COM ONBOARDING) ──────────── #
-# [NOVO] Ferramentas de Onboarding
+# ───────────────── 4. FERRAMENTAS ──────────────────────────── #
+def buscar_ou_criar_paciente(db: Session, tel: str) -> Paciente:
+    paciente = db.query(Paciente).filter_by(telefone=tel).first()
+    if not paciente: paciente = Paciente(telefone=tel, nome_completo=f"Novo Paciente {tel}"); db.add(paciente); db.commit(); db.refresh(paciente)
+    return paciente
 def verificar_cadastro_paciente(db: Session, telefone_paciente: str) -> str:
-    paciente = db.query(Paciente).filter_by(telefone=telefone_paciente).first()
-    if not paciente:
-        paciente = Paciente(telefone=telefone_paciente)
-        db.add(paciente); db.commit(); db.refresh(paciente)
-        return "Paciente novo. É necessário coletar: nome_completo, endereco, email, data_nascimento (AAAA-MM-DD)."
-    
-    dados_faltantes = []
-    if not paciente.nome_completo: dados_faltantes.append("nome_completo")
-    if not paciente.endereco: dados_faltantes.append("endereco")
-    if not paciente.email: dados_faltantes.append("email")
-    if not paciente.data_nascimento: dados_faltantes.append("data_nascimento (AAAA-MM-DD)")
-    
+    paciente = buscar_ou_criar_paciente(db, tel=telefone_paciente)
+    dados_faltantes = [campo for campo, valor in [("nome_completo", paciente.nome_completo), ("endereco", paciente.endereco), ("email", paciente.email), ("data_nascimento", paciente.data_nascimento)] if not valor]
     if dados_faltantes:
-        return f"Paciente já existe mas o cadastro está incompleto. Faltam os seguintes dados: {', '.join(dados_faltantes)}."
-    
+        return f"Paciente já existe mas o cadastro está incompleto. Faltam os seguintes dados: {', '.join(dados_faltantes).replace('_', ' ')}."
     return f"Paciente {paciente.nome_completo} já possui cadastro completo."
-
 def atualizar_dados_paciente(db: Session, telefone_paciente: str, nome_completo: Optional[str] = None, endereco: Optional[str] = None, email: Optional[str] = None, data_nascimento: Optional[str] = None) -> str:
-    paciente = db.query(Paciente).filter_by(telefone=telefone_paciente).first()
-    if not paciente: return "Erro: Paciente não encontrado para atualização."
-    
+    paciente = buscar_ou_criar_paciente(db, tel=telefone_paciente)
     campos_atualizados = []
     if nome_completo: paciente.nome_completo = nome_completo; campos_atualizados.append("nome")
     if endereco: paciente.endereco = endereco; campos_atualizados.append("endereço")
@@ -96,47 +88,34 @@ def atualizar_dados_paciente(db: Session, telefone_paciente: str, nome_completo:
     if data_nascimento:
         try: paciente.data_nascimento = datetime.strptime(data_nascimento, "%Y-%m-%d").date(); campos_atualizados.append("data de nascimento")
         except ValueError: return "Formato de data de nascimento inválido. Use AAAA-MM-DD."
-    
     db.commit()
     return f"Dados atualizados com sucesso: {', '.join(campos_atualizados)}." if campos_atualizados else "Nenhum dado novo foi fornecido para atualização."
-
-# Ferramentas de agendamento (ajustadas)
 def agendar_consulta(db: Session, telefone_paciente: str, data_hora_agendamento: str, procedimento: str) -> str:
     try: dt = datetime.strptime(data_hora_agendamento, "%Y-%m-%d %H:%M")
     except ValueError: return "Formato de data/hora inválido. Use AAAA-MM-DD HH:MM."
     if dt < datetime.now(): return "Não é possível agendar no passado."
     if dt.weekday() >= 5: return "A clínica não funciona aos fins de semana."
     if not (9 <= dt.hour < 18): return "O horário de funcionamento é das 09:00 às 18:00."
-    pac = db.query(Paciente).filter_by(telefone=telefone_paciente).first()
-    if not pac: return "Erro crítico: paciente não encontrado para agendamento."
-    db.add(Agendamento(paciente_id=pac.id, data_hora=dt, procedimento=procedimento))
-    db.commit()
+    pac = buscar_ou_criar_paciente(db, tel=telefone_paciente); db.add(Agendamento(paciente_id=pac.id, data_hora=dt, procedimento=procedimento)); db.commit()
     return f"Sucesso! Agendamento para '{procedimento}' criado para {dt.strftime('%d/%m/%Y às %H:%M')}."
-
-# [BUG CORRIGIDO] Agora filtra por status
 def consultar_meus_agendamentos(db: Session, telefone_paciente: str) -> str:
-    pac = db.query(Paciente).filter_by(telefone=telefone_paciente).first()
-    if not pac: return "Não encontrei seu cadastro. Precisamos fazer seu cadastro primeiro."
+    pac = buscar_ou_criar_paciente(db, tel=telefone_paciente)
     ags = db.query(Agendamento).filter(Agendamento.paciente_id == pac.id, Agendamento.status == "confirmado", Agendamento.data_hora >= datetime.now()).order_by(Agendamento.data_hora).all()
     if not ags: return "Você não possui agendamentos futuros."
     linhas = [f"- ID {a.id}: {a.procedimento} em {a.data_hora.strftime('%d/%m/%Y às %H:%M')}" for a in ags]
     return "Seus próximos agendamentos são:\n" + "\n".join(linhas)
-
 def consultar_horarios_disponiveis(db: Session, telefone_paciente: str, dia: str) -> str:
     try: data_consulta = datetime.strptime(dia, "%Y-%m-%d").date()
     except ValueError: return "Formato de data inválido. Use AAAA-MM-DD."
-    agendamentos_do_dia = db.query(Agendamento.data_hora).filter(sql_func.date(Agendamento.data_hora) == data_consulta).all()
+    agendamentos_do_dia = db.query(Agendamento.data_hora).filter(sql_func.date(Agendamento.data_hora) == data_consulta, Agendamento.status == 'confirmado').all()
     horarios_ocupados = {ag.data_hora.time() for ag in agendamentos_do_dia}
     slots_possiveis = {time(h) for h in range(9, 18)}
     horarios_disponiveis = sorted(list(slots_possiveis - horarios_ocupados))
     if not horarios_disponiveis: return f"Não há mais horários disponíveis para o dia {data_consulta.strftime('%d/%m/%Y')}."
     horarios_formatados = [t.strftime('%H:%M') for t in horarios_disponiveis]
     return f"Os horários livres para o dia {data_consulta.strftime('%d/%m/%Y')} são: {', '.join(horarios_formatados)}."
-
-# (O resto das ferramentas permanecem as mesmas, mas serão menos usadas pela IA)
 def consultar_e_cancelar_inteligente(db: Session, telefone_paciente: str, dica: Optional[str] = None) -> str:
-    pac = db.query(Paciente).filter_by(telefone=telefone_paciente).first()
-    if not pac: return "Não encontrei seu cadastro."
+    pac = buscar_ou_criar_paciente(db, tel=telefone_paciente)
     query = db.query(Agendamento).filter(Agendamento.paciente_id == pac.id, Agendamento.status == "confirmado", Agendamento.data_hora >= datetime.now())
     if dica: query = query.filter(Agendamento.procedimento.ilike(f'%{dica}%'))
     ags = query.all()
@@ -163,21 +142,26 @@ def consultar_precos_procedimentos(db: Session, telefone_paciente: str, termo_bu
         else: respostas.append(f"Para {r.nome}, o valor é {r.valor_descritivo}")
     return "\n".join(respostas)
 
-# ATUALIZADO: Lista completa de ferramentas
 available_functions = {"verificar_cadastro_paciente": verificar_cadastro_paciente, "atualizar_dados_paciente": atualizar_dados_paciente, "agendar_consulta": agendar_consulta, "consultar_meus_agendamentos": consultar_meus_agendamentos, "consultar_e_cancelar_inteligente": consultar_e_cancelar_inteligente, "consultar_horarios_disponiveis": consultar_horarios_disponiveis, "listar_todos_os_procedimentos": listar_todos_os_procedimentos, "consultar_precos_procedimentos": consultar_precos_procedimentos}
 tools = [{"type": "function", "function": {"name": "verificar_cadastro_paciente", "description": "Sempre a PRIMEIRA ferramenta a ser usada para verificar se o paciente tem cadastro completo ou se dados faltam.", "parameters": {"type": "object", "properties": {}}}},
-         {"type": "function", "function": {"name": "atualizar_dados_paciente", "description": "Atualiza os dados de um paciente (nome, endereço, email, data de nascimento) após coletá-los.", "parameters": {"type": "object", "properties": {"nome_completo": {"type": "string"}, "endereco": {"type": "string"}, "email": {"type": "string"}, "data_nascimento": {"type": "string", "description": "Formato AAAA-MM-DD"}}}}},
+         {"type": "function", "function": {"name": "atualizar_dados_paciente", "description": "Atualiza os dados de um paciente após coletá-los.", "parameters": {"type": "object", "properties": {"nome_completo": {"type": "string"}, "endereco": {"type": "string"}, "email": {"type": "string"}, "data_nascimento": {"type": "string", "description": "Formato AAAA-MM-DD"}}}}},
          {"type": "function", "function": {"name": "agendar_consulta", "description": "Ação FINAL para agendar uma consulta, usada apenas após o usuário confirmar o resumo.", "parameters": {"type": "object", "properties": {"data_hora_agendamento": {"type": "string"}, "procedimento": {"type": "string"}}, "required": ["data_hora_agendamento", "procedimento"]}}},
          {"type": "function", "function": {"name": "consultar_horarios_disponiveis", "description": "Verifica todos os horários livres em um dia específico.", "parameters": {"type": "object", "properties": {"dia": {"type": "string", "description": "O dia a ser verificado no formato AAAA-MM-DD."}}, "required": ["dia"]}}},
          {"type": "function", "function": {"name": "consultar_meus_agendamentos", "description": "Lista agendamentos futuros confirmados do paciente.", "parameters": {"type": "object", "properties": {}}}},
-         {"type": "function", "function": {"name": "consultar_e_cancelar_inteligente", "description": "Cancela uma consulta. Pode receber o nome do procedimento como dica.", "parameters": {"type": "object", "properties": {"dica": {"type": "string", "description": "O procedimento que o usuário quer cancelar, se ele especificar."}}}}},
+         {"type": "function", "function": {"name": "consultar_e_cancelar_inteligente", "description": "Cancela uma consulta. Pode receber o nome do procedimento como dica.", "parameters": {"type": "object", "properties": {"dica": {"type": "string", "description": "O procedimento ou hora que o usuário quer cancelar, se ele especificar."}}}}},
          {"type": "function", "function": {"name": "listar_todos_os_procedimentos", "description": "Lista todos os serviços e procedimentos oferecidos pela clínica.", "parameters": {"type": "object", "properties": {}}}},
          {"type": "function", "function": {"name": "consultar_precos_procedimentos", "description": "Consulta preços de procedimentos.", "parameters": {"type": "object", "properties": {"termo_busca": {"type": "string", "description": "O procedimento que o usuário quer saber o preço."}}, "required": ["termo_busca"]}}}]
 
 # ───────────────── 5. APP FASTAPI ───────────────────────────── #
-app = FastAPI(title="OdontoBot AI", description="Automação de WhatsApp para DI DONATO ODONTO.", version="7.0.0-demo")
+app = FastAPI(title="OdontoBot AI", description="Automação de WhatsApp para DI DONATO ODONTO.", version="7.0.1-fix")
+
 @app.on_event("startup")
-async def startup_event(): await asyncio.to_thread(criar_tabelas); print("Tabelas verificadas/criadas.", flush=True);_ = SessionLocal(); with _ as db: popular_procedimentos_iniciais(db)
+async def startup_event():
+    await asyncio.to_thread(criar_tabelas)
+    print("Tabelas verificadas/criadas.", flush=True)
+    with SessionLocal() as db:
+        popular_procedimentos_iniciais(db)
+
 @app.get("/")
 def health_get(): return {"status": "ok"}
 @app.head("/")
@@ -211,17 +195,13 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
     if not mensagem_usuario:
         await enviar_resposta_whatsapp(telefone, "Olá! Sou o assistente virtual da DI DONATO ODONTO. Como posso te ajudar hoje?")
         return {"status": "ignorado", "motivo": "sem conteúdo processável"}
-
-    paciente = db.query(Paciente).filter_by(telefone=telefone).first()
-    if not paciente:
-        paciente = Paciente(telefone=telefone)
-        db.add(paciente); db.commit(); db.refresh(paciente)
-
-    db.add(HistoricoConversa(paciente_id=paciente.id, role="user", content=mensagem_usuario)); db.commit()
+    
+    # [CORREÇÃO] Lógica de criação de paciente movida para dentro da ferramenta de verificação
+    db.add(HistoricoConversa(paciente_id=buscar_ou_criar_paciente(db, tel=telefone).id, role="user", content=mensagem_usuario)); db.commit()
+    paciente = buscar_ou_criar_paciente(db, tel=telefone) # Garante que temos o paciente para o histórico
     historico_recente = db.query(HistoricoConversa).filter(HistoricoConversa.paciente_id == paciente.id, HistoricoConversa.timestamp >= datetime.utcnow() - timedelta(hours=24), HistoricoConversa.role != 'system').order_by(HistoricoConversa.timestamp).all()
     
     NOME_CLINICA, PROFISSIONAL = "DI DONATO ODONTO", "Dra. Valéria Cristina Di Donato"
-    # ATUALIZADO: O novo "Manual de Operações" da IA
     system_prompt = (
         f"Você é OdontoBot, assistente virtual da {NOME_CLINICA}, onde os atendimentos são realizados pela {PROFISSIONAL}. "
         f"Hoje é {datetime.now().strftime('%d/%m/%Y')}. Siga ESTAS ETAPAS RIGOROSAMENTE:\n"
