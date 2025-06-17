@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: odonto-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter  # ou standard/pro
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase: odonto-db
