@@ -57,7 +57,7 @@ def criar_tabelas(): Base.metadata.create_all(bind=engine)
 def popular_procedimentos_iniciais(db: Session):
     if db.query(Procedimento).first(): return
     print("Populando tabela de procedimentos pela primeira vez...", flush=True)
-    procedimentos_data = [{"categoria": "Procedimentos Básicos", "nome": "Consulta diagnóstica", "valor": "R$100 a R$162"}, {"categoria": "Radiografias", "nome": "Raio-X periapical ou bite-wing", "valor": "R$15 a R$34"}, {"categoria": "Radiografias", "nome": "Raio-X Panorâmica", "valor": "R$57 a R$115"}, {"categoria": "Procedimentos Básicos", "nome": "Limpeza simples (Profilaxia)", "valor": "R$100 a R$400 (média R$150–400)"}, {"categoria": "Restaurações (Obturações)", "nome": "Restauração de Resina (1 face)", "valor": "a partir de R$100"}, {"categoria": "Restaurações (Obturações)", "nome": "Restauração de Resina (2 faces)", "valor": "a partir de R$192"}, {"categoria": "Endodontia (Canal)", "nome": "Tratamento de Canal (Incisivo/Canino)", "valor": "R$517 a R$630"}, {"categoria": "Endodontia (Canal)", "nome": "Tratamento de Canal (Pré-molar/Molar)", "valor": "R$432 a R$876"}, {"categoria": "Exodontia (Procedimentos Cirúrgicos)", "nome": "Extração simples de dente permanente", "valor": "R$150 a R$172"}, {"categoria": "Exodontia (Procedimentos Cirúrgicos)", "nome": "Extração de dente de leite", "valor": "R$96 a R$102"}, {"categoria": "Exodontia (Procedimentos Cirúrgicos)", "nome": "Extração de dente incluso/impactado", "valor": "R$364 a R$390"}, {"categoria": "Próteses e Coroas", "nome": "Coroa provisória", "valor": "R$150 a R$268"}, {"categoria": "Próteses e Coroas", "nome": "Coroa metalo-cerâmica", "valor": "R$576 a R$600"}, {"categoria": "Próteses e Coroas", "nome": "Coroa cerâmica pura", "valor": "R$576 a R$605"}, {"categoria": "Clareamento Dentário", "nome": "Clareamento caseiro (por arcada)", "valor": "R$316 a R$330"}, {"categoria": "Clareamento Dentário", "nome": "Clareamento em consultório (por arcada)", "valor": "R$316 a R$330"}, {"categoria": "Implantes e Cirurgias Ósseas", "nome": "Implante dentário unitário (coroa + pilar)", "valor": "a partir de R$576"}, {"categoria": "Implantes e Cirurgias Ósseas", "nome": "Enxertos ósseos", "valor": "R$200 a R$800"}, {"categoria": "Implantes e Cirurgias Ósseas", "nome": "Levantamento de seio maxilar (sinus lift)", "valor": "R$576 a R$800"}]
+    procedimentos_data = [{"categoria": "Procedimentos Básicos", "nome": "Consulta diagnóstica", "valor": "R$100 a R$162"}, {"categoria": "Radiografias", "nome": "Raio-X periapical ou bite-wing", "valor": "R$15 a R$34"}, {"categoria": "Radiografias", "nome": "Raio-X Panorâmica", "valor": "R$57 a R$115"}, {"categoria": "Procedimentos Básicos", "nome": "Limpeza simples (Profilaxia)", "valor": "R$100 a R$400"}, {"categoria": "Restaurações (Obturações)", "nome": "Restauração de Resina (1 face)", "valor": "a partir de R$100"}, {"categoria": "Restaurações (Obturações)", "nome": "Restauração de Resina (2 faces)", "valor": "a partir de R$192"}, {"categoria": "Endodontia (Canal)", "nome": "Tratamento de Canal (Incisivo/Canino)", "valor": "R$517 a R$630"}, {"categoria": "Endodontia (Canal)", "nome": "Tratamento de Canal (Pré-molar/Molar)", "valor": "R$432 a R$876"}, {"categoria": "Exodontia (Procedimentos Cirúrgicos)", "nome": "Extração simples de dente permanente", "valor": "R$150 a R$172"}, {"categoria": "Exodontia (Procedimentos Cirúrgicos)", "nome": "Extração de dente de leite", "valor": "R$96 a R$102"}, {"categoria": "Exodontia (Procedimentos Cirúrgicos)", "nome": "Extração de dente incluso/impactado", "valor": "R$364 a R$390"}, {"categoria": "Próteses e Coroas", "nome": "Coroa provisória", "valor": "R$150 a R$268"}, {"categoria": "Próteses e Coroas", "nome": "Coroa metalo-cerâmica", "valor": "R$576 a R$600"}, {"categoria": "Próteses e Coroas", "nome": "Coroa cerâmica pura", "valor": "R$576 a R$605"}, {"categoria": "Clareamento Dentário", "nome": "Clareamento caseiro (por arcada)", "valor": "R$316 a R$330"}, {"categoria": "Clareamento Dentário", "nome": "Clareamento em consultório (por arcada)", "valor": "R$316 a R$330"}, {"categoria": "Implantes e Cirurgias Ósseas", "nome": "Implante dentário unitário", "valor": "a partir de R$576"}, {"categoria": "Implantes e Cirurgias Ósseas", "nome": "Enxertos ósseos", "valor": "R$200 a R$800"}, {"categoria": "Implantes e Cirurgias Ósseas", "nome": "Levantamento de seio maxilar", "valor": "R$576 a R$800"}]
     for p_data in procedimentos_data: db.add(Procedimento(nome=p_data["nome"], categoria=p_data["categoria"], valor_descritivo=p_data["valor"]))
     db.commit()
 
@@ -80,12 +80,6 @@ def consultar_meus_agendamentos(db: Session, telefone_paciente: str) -> str:
     if not ags: return "Você não possui agendamentos futuros."
     linhas = [f"- ID {a.id}: {a.procedimento} em {a.data_hora.strftime('%d/%m/%Y às %H:%M')}" for a in ags]
     return "Seus próximos agendamentos são:\n" + "\n".join(linhas)
-def cancelar_agendamento(db: Session, telefone_paciente: str, id_agendamento: int) -> str:
-    pac = buscar_ou_criar_paciente(db, telefone_paciente); ag = db.query(Agendamento).filter_by(id=id_agendamento, paciente_id=pac.id).first()
-    if not ag: return f"Agendamento ID {id_agendamento} não encontrado."
-    if ag.status == "cancelado": return "Esse agendamento já está cancelado."
-    ag.status = "cancelado"; db.commit()
-    return f"Agendamento {id_agendamento} cancelado com sucesso."
 def consultar_e_reagendar_inteligente(db: Session, telefone_paciente: str, novo_data_hora_agendamento: str) -> str:
     pac = buscar_ou_criar_paciente(db, telefone_paciente)
     ags = db.query(Agendamento).filter(Agendamento.paciente_id == pac.id, Agendamento.data_hora >= datetime.now(), Agendamento.status == "confirmado").all()
@@ -99,53 +93,52 @@ def consultar_e_reagendar_inteligente(db: Session, telefone_paciente: str, novo_
     if not (9 <= nova_dt.hour < 18): return f"O horário de funcionamento é das 09:00 às 18:00."
     id_antigo = ag_reagendar.id; ag_reagendar.data_hora = nova_dt; db.commit()
     return f"Pronto! Seu agendamento (ID {id_antigo}) foi reagendado para {nova_dt.strftime('%d/%m/%Y às %H:%M')}."
-
-# [NOVO] Ferramenta para listar todos os procedimentos
+# [NOVO] Ferramenta de cancelamento inteligente
+def consultar_e_cancelar_inteligente(db: Session, telefone_paciente: str) -> str:
+    """Busca os agendamentos do paciente e, se houver apenas um, o cancela. Se houver vários, pede para especificar."""
+    pac = buscar_ou_criar_paciente(db, telefone_paciente)
+    agendamentos_ativos = db.query(Agendamento).filter(Agendamento.paciente_id == pac.id, Agendamento.data_hora >= datetime.now(), Agendamento.status == "confirmado").all()
+    if not agendamentos_ativos:
+        return "Você não tem nenhum agendamento futuro para cancelar."
+    if len(agendamentos_ativos) > 1:
+        return "Encontrei mais de um agendamento. Qual deles você gostaria de cancelar? Por favor, informe o ID.\n" + consultar_meus_agendamentos(db, telefone_paciente)
+    agendamento_para_cancelar = agendamentos_ativos[0]
+    agendamento_para_cancelar.status = "cancelado"
+    db.commit()
+    return f"Ok, cancelei seu agendamento de {agendamento_para_cancelar.procedimento} do dia {agendamento_para_cancelar.data_hora.strftime('%d/%m/%Y às %H:%M')}."
 def listar_todos_os_procedimentos(db: Session, telefone_paciente: str) -> str:
-    """Lista todos os procedimentos e suas categorias oferecidos pela clínica."""
+    """Lista todos os serviços e procedimentos oferecidos pela clínica."""
     procedimentos = db.query(Procedimento).order_by(Procedimento.categoria, Procedimento.nome).all()
     if not procedimentos: return "Não consegui encontrar a lista de procedimentos no momento."
-    
-    categorias = defaultdict(list)
-    for p in procedimentos: categorias[p.categoria].append(p.nome)
-    
+    categorias = defaultdict(list);_ = [categorias[p.categoria].append(p.nome) for p in procedimentos]
     resposta = "Oferecemos uma ampla gama de serviços para cuidar do seu sorriso! Nossos procedimentos incluem:\n\n"
     for categoria, nomes in categorias.items():
-        resposta += f"**{categoria}**\n"
-        for nome in nomes: resposta += f"- {nome}\n"
-        resposta += "\n"
+        resposta += f"**{categoria}**\n";_ = [resposta := resposta + f"- {nome}\n" for nome in nomes];resposta += "\n"
     return resposta
-
-# [MELHORADO] Busca robusta por palavra-chave
 def consultar_precos_procedimentos(db: Session, telefone_paciente: str, termo_busca: str) -> str:
     """Consulta o preço de um ou mais procedimentos com base em palavras-chave."""
-    palavras_chave = termo_busca.split()
-    filtros = [Procedimento.nome.ilike(f'%{palavra}%') for palavra in palavras_chave]
-    
+    palavras_chave = termo_busca.split(); filtros = [Procedimento.nome.ilike(f'%{palavra}%') for palavra in palavras_chave]
     resultados = db.query(Procedimento).filter(and_(*filtros)).all()
-    
-    if not resultados:
-        return f"Não encontrei informações de valores para '{termo_busca}'. Posso tentar buscar por outro termo?"
-    
+    if not resultados: return f"Não encontrei informações de valores para '{termo_busca}'. Posso buscar por outro termo?"
     linhas = [f"- {r.nome}: {r.valor_descritivo}" for r in resultados]
     return f"Encontrei os seguintes valores para '{termo_busca}':\n" + "\n".join(linhas)
 
-available_functions = {"agendar_consulta": agendar_consulta, "consultar_meus_agendamentos": consultar_meus_agendamentos, "cancelar_agendamento": cancelar_agendamento, "consultar_e_reagendar_inteligente": consultar_e_reagendar_inteligente, "listar_todos_os_procedimentos": listar_todos_os_procedimentos, "consultar_precos_procedimentos": consultar_precos_procedimentos}
+# ATUALIZADO: Lista de ferramentas disponíveis e suas definições
+available_functions = {"agendar_consulta": agendar_consulta, "consultar_meus_agendamentos": consultar_meus_agendamentos, "consultar_e_reagendar_inteligente": consultar_e_reagendar_inteligente, "consultar_e_cancelar_inteligente": consultar_e_cancelar_inteligente, "listar_todos_os_procedimentos": listar_todos_os_procedimentos, "consultar_precos_procedimentos": consultar_precos_procedimentos}
 tools = [{"type": "function", "function": {"name": "agendar_consulta", "description": "Agenda uma nova consulta.", "parameters": {"type": "object", "properties": {"data_hora_agendamento": {"type": "string"}, "procedimento": {"type": "string"}}, "required": ["data_hora_agendamento", "procedimento"]}}},
          {"type": "function", "function": {"name": "consultar_meus_agendamentos", "description": "Lista agendamentos futuros do paciente, com IDs.", "parameters": {"type": "object", "properties": {}}}},
-         {"type": "function", "function": {"name": "cancelar_agendamento", "description": "Cancela um agendamento por ID.", "parameters": {"type": "object", "properties": {"id_agendamento": {"type": "integer"}}, "required": ["id_agendamento"]}}},
          {"type": "function", "function": {"name": "consultar_e_reagendar_inteligente", "description": "Ferramenta inteligente para reagendar uma consulta.", "parameters": {"type": "object", "properties": {"novo_data_hora_agendamento": {"type": "string", "description": "Nova data/hora no formato AAAA-MM-DD HH:MM."}}, "required": ["novo_data_hora_agendamento"]}}},
-         {"type": "function", "function": {"name": "listar_todos_os_procedimentos", "description": "Lista todos os serviços e procedimentos oferecidos pela clínica. Use quando o usuário fizer uma pergunta geral sobre o que a clínica faz.", "parameters": {"type": "object", "properties": {}}}},
-         {"type": "function", "function": {"name": "consultar_precos_procedimentos", "description": "Consulta preços de procedimentos. Use quando o usuário perguntar 'quanto custa', 'valor', 'preço'.", "parameters": {"type": "object", "properties": {"termo_busca": {"type": "string", "description": "O procedimento que o usuário quer saber o preço, ex: 'limpeza' ou 'raio x'."}}, "required": ["termo_busca"]}}}]
+         {"type": "function", "function": {"name": "consultar_e_cancelar_inteligente", "description": "Ferramenta principal para cancelar uma consulta. Use sempre que o usuário expressar a intenção de cancelar. Não precisa de ID.", "parameters": {"type": "object", "properties": {}}}},
+         {"type": "function", "function": {"name": "listar_todos_os_procedimentos", "description": "Lista todos os serviços oferecidos pela clínica. Use quando o usuário fizer uma pergunta geral sobre o que a clínica faz.", "parameters": {"type": "object", "properties": {}}}},
+         {"type": "function", "function": {"name": "consultar_precos_procedimentos", "description": "Consulta preços de procedimentos. Use quando o usuário perguntar 'quanto custa', 'valor', 'preço'.", "parameters": {"type": "object", "properties": {"termo_busca": {"type": "string", "description": "O procedimento que o usuário quer saber o preço."}}, "required": ["termo_busca"]}}}]
 
 # ───────────────── 5. APP FASTAPI ───────────────────────────── #
-app = FastAPI(title="OdontoBot AI", description="Automação de WhatsApp com OpenRouter e Whisper.", version="4.1.0-demo")
+app = FastAPI(title="OdontoBot AI", description="Automação de WhatsApp com OpenRouter e Whisper.", version="4.2.0-demo-fix")
 @app.on_event("startup")
 async def startup_event():
     await asyncio.to_thread(criar_tabelas)
     print("Tabelas verificadas/criadas.", flush=True)
-    with SessionLocal() as db:
-        popular_procedimentos_iniciais(db)
+    with SessionLocal() as db: popular_procedimentos_iniciais(db)
 @app.get("/")
 def health_get(): return {"status": "ok"}
 @app.head("/")
@@ -169,8 +162,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
     raw = await request.json(); print(">>> PAYLOAD RECEBIDO:", raw, flush=True)
     try: payload = ZapiWebhookPayload(**raw)
     except Exception as e: print("Erro de validação Pydantic:", e, flush=True); raise HTTPException(422, "Formato de payload inválido")
-    telefone = payload.phone
-    mensagem_usuario = None
+    telefone = payload.phone; mensagem_usuario = None
     if payload.audio and payload.audio.audioUrl:
         texto_transcrito = await transcrever_audio_whisper(payload.audio.audioUrl)
         if texto_transcrito: mensagem_usuario = texto_transcrito; print(f">>> Texto transcrito: '{texto_transcrito}'", flush=True)
@@ -183,15 +175,11 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
 
     paciente = buscar_ou_criar_paciente(db, tel=telefone)
     db.add(HistoricoConversa(paciente_id=paciente.id, role="user", content=mensagem_usuario)); db.commit()
-    
-    # [CORRIGIDO] Lógica de histórico para não salvar o prompt do sistema
     historico_recente = db.query(HistoricoConversa).filter(HistoricoConversa.paciente_id == paciente.id, HistoricoConversa.timestamp >= datetime.utcnow() - timedelta(hours=24), HistoricoConversa.role != 'system').order_by(HistoricoConversa.timestamp).all()
-    
     NOME_CLINICA, PROFISSIONAL = "DI DONATO ODONTO", "Dra. Valéria Cristina Di Donato"
     system_prompt = (f"Você é OdontoBot, assistente virtual da {NOME_CLINICA}, onde os atendimentos são realizados pela {PROFISSIONAL}. "
                      f"Seja sempre educado, prestativo e conciso. Hoje é {datetime.now().strftime('%d/%m/%Y')}. "
                      "Use as ferramentas para responder. Se pedirem conselhos médicos, recuse educadamente e diga que apenas a doutora pode fornecer essa orientação na consulta.")
-    
     mensagens_para_ia: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
     for msg in historico_recente: mensagens_para_ia.append({"role": msg.role, "content": msg.content})
 
