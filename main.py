@@ -216,7 +216,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
     mensagens_para_ia: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
     for msg in historico_recente: mensagens_para_ia.append({"role": msg.role, "content": msg.content})
     try:
-        modelo_chat = "google/gemini-2.5-pro-preview"
+        modelo_chat = "google/gemini-2.5-flash-preview-05-20"
         resp = openrouter_chat_completion(model=modelo_chat, messages=mensagens_para_ia, tools=tools, tool_choice="auto")
         ai_msg = resp.choices[0].message
         while ai_msg.tool_calls:
