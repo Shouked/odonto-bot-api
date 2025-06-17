@@ -1,19 +1,15 @@
 """
-API principal do OdontoBot AI. Versão de Demonstração para Clínica.
-
-FastAPI que serve de webhook para a Z-API, processa mensagens de WhatsApp via
-OpenAI e interage com o banco para gerenciar pacientes e agendamentos.
+API principal do OdontoBot AI. Versão Final para Demonstração.
 """
 
-import os, json, asyncio
+import os, json, asyncio, re
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
-
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, Response, Request
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Text, or_, and_
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Text, and_
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
 from collections import defaultdict
 
@@ -35,9 +31,7 @@ try:
     async def transcrever_audio_whisper(audio_url: str) -> Optional[str]:
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get(audio_url, timeout=30)
-                response.raise_for_status()
-                audio_bytes = response.content
+                response = await client.get(audio_url, timeout=30); response.raise_for_status(); audio_bytes = response.content
             transcription = await asyncio.to_thread(openai_whisper_client.audio.transcriptions.create, model="whisper-1", file=("audio.ogg", audio_bytes, "audio/ogg"))
             return transcription.text
         except Exception as e: print(f"Erro ao transcrever áudio: {e}", flush=True); return None
@@ -93,47 +87,49 @@ def consultar_e_reagendar_inteligente(db: Session, telefone_paciente: str, novo_
     if not (9 <= nova_dt.hour < 18): return f"O horário de funcionamento é das 09:00 às 18:00."
     id_antigo = ag_reagendar.id; ag_reagendar.data_hora = nova_dt; db.commit()
     return f"Pronto! Seu agendamento (ID {id_antigo}) foi reagendado para {nova_dt.strftime('%d/%m/%Y às %H:%M')}."
-# [NOVO] Ferramenta de cancelamento inteligente
 def consultar_e_cancelar_inteligente(db: Session, telefone_paciente: str) -> str:
-    """Busca os agendamentos do paciente e, se houver apenas um, o cancela. Se houver vários, pede para especificar."""
     pac = buscar_ou_criar_paciente(db, telefone_paciente)
-    agendamentos_ativos = db.query(Agendamento).filter(Agendamento.paciente_id == pac.id, Agendamento.data_hora >= datetime.now(), Agendamento.status == "confirmado").all()
-    if not agendamentos_ativos:
-        return "Você não tem nenhum agendamento futuro para cancelar."
-    if len(agendamentos_ativos) > 1:
-        return "Encontrei mais de um agendamento. Qual deles você gostaria de cancelar? Por favor, informe o ID.\n" + consultar_meus_agendamentos(db, telefone_paciente)
-    agendamento_para_cancelar = agendamentos_ativos[0]
-    agendamento_para_cancelar.status = "cancelado"
-    db.commit()
-    return f"Ok, cancelei seu agendamento de {agendamento_para_cancelar.procedimento} do dia {agendamento_para_cancelar.data_hora.strftime('%d/%m/%Y às %H:%M')}."
+    ags = db.query(Agendamento).filter(Agendamento.paciente_id == pac.id, Agendamento.data_hora >= datetime.now(), Agendamento.status == "confirmado").all()
+    if not ags: return "Você não tem nenhum agendamento futuro para cancelar."
+    if len(ags) > 1: return "Encontrei mais de um agendamento. Qual deles você gostaria de cancelar? Por favor, informe o ID.\n" + consultar_meus_agendamentos(db, telefone_paciente)
+    ag_cancelar = ags[0]
+    ag_cancelar.status = "cancelado"; db.commit()
+    return f"Ok, cancelei seu agendamento de {ag_cancelar.procedimento} do dia {ag_cancelar.data_hora.strftime('%d/%m/%Y às %H:%M')}."
 def listar_todos_os_procedimentos(db: Session, telefone_paciente: str) -> str:
-    """Lista todos os serviços e procedimentos oferecidos pela clínica."""
     procedimentos = db.query(Procedimento).order_by(Procedimento.categoria, Procedimento.nome).all()
     if not procedimentos: return "Não consegui encontrar a lista de procedimentos no momento."
     categorias = defaultdict(list);_ = [categorias[p.categoria].append(p.nome) for p in procedimentos]
-    resposta = "Oferecemos uma ampla gama de serviços para cuidar do seu sorriso! Nossos procedimentos incluem:\n\n"
+    resposta = "Oferecemos uma ampla gama de serviços! Nossos procedimentos incluem:\n\n"
     for categoria, nomes in categorias.items():
-        resposta += f"**{categoria}**\n";_ = [resposta := resposta + f"- {nome}\n" for nome in nomes];resposta += "\n"
+        resposta += f"*{categoria}*\n";_ = [resposta := resposta + f"- {nome}\n" for nome in nomes];resposta += "\n"
     return resposta
+# [BLINDADO] Busca por preços agora é muito mais robusta.
 def consultar_precos_procedimentos(db: Session, telefone_paciente: str, termo_busca: str) -> str:
     """Consulta o preço de um ou mais procedimentos com base em palavras-chave."""
-    palavras_chave = termo_busca.split(); filtros = [Procedimento.nome.ilike(f'%{palavra}%') for palavra in palavras_chave]
+    # Normaliza o termo de busca: remove acentos, hífens e passa para minúsculas.
+    termo_normalizado = re.sub(r'[-.,]', ' ', termo_busca.lower())
+    palavras_chave = termo_normalizado.split()
+    
+    # Constrói uma query que busca por TODAS as palavras-chave no nome do procedimento.
+    filtros = [Procedimento.nome.ilike(f'%{palavra}%') for palavra in palavras_chave]
     resultados = db.query(Procedimento).filter(and_(*filtros)).all()
-    if not resultados: return f"Não encontrei informações de valores para '{termo_busca}'. Posso buscar por outro termo?"
+    
+    if not resultados:
+        return f"Não encontrei informações de valores para '{termo_busca}'. Verifique se o nome está correto ou peça a lista completa de procedimentos."
+    
     linhas = [f"- {r.nome}: {r.valor_descritivo}" for r in resultados]
     return f"Encontrei os seguintes valores para '{termo_busca}':\n" + "\n".join(linhas)
 
-# ATUALIZADO: Lista de ferramentas disponíveis e suas definições
-available_functions = {"agendar_consulta": agendar_consulta, "consultar_meus_agendamentos": consultar_meus_agendamentos, "consultar_e_reagendar_inteligente": consultar_e_reagendar_inteligente, "consultar_e_cancelar_inteligente": consultar_e_cancelar_inteligente, "listar_todos_os_procedimentos": listar_todos_os_procedimentos, "consultar_precos_procedimentos": consultar_precos_procedimentos}
+available_functions = {"agendar_consulta": agendar_consulta, "consultar_meus_agendamentos": consultar_meus_agendamentos, "consultar_e_cancelar_inteligente": consultar_e_cancelar_inteligente, "consultar_e_reagendar_inteligente": consultar_e_reagendar_inteligente, "listar_todos_os_procedimentos": listar_todos_os_procedimentos, "consultar_precos_procedimentos": consultar_precos_procedimentos}
 tools = [{"type": "function", "function": {"name": "agendar_consulta", "description": "Agenda uma nova consulta.", "parameters": {"type": "object", "properties": {"data_hora_agendamento": {"type": "string"}, "procedimento": {"type": "string"}}, "required": ["data_hora_agendamento", "procedimento"]}}},
          {"type": "function", "function": {"name": "consultar_meus_agendamentos", "description": "Lista agendamentos futuros do paciente, com IDs.", "parameters": {"type": "object", "properties": {}}}},
          {"type": "function", "function": {"name": "consultar_e_reagendar_inteligente", "description": "Ferramenta inteligente para reagendar uma consulta.", "parameters": {"type": "object", "properties": {"novo_data_hora_agendamento": {"type": "string", "description": "Nova data/hora no formato AAAA-MM-DD HH:MM."}}, "required": ["novo_data_hora_agendamento"]}}},
-         {"type": "function", "function": {"name": "consultar_e_cancelar_inteligente", "description": "Ferramenta principal para cancelar uma consulta. Use sempre que o usuário expressar a intenção de cancelar. Não precisa de ID.", "parameters": {"type": "object", "properties": {}}}},
-         {"type": "function", "function": {"name": "listar_todos_os_procedimentos", "description": "Lista todos os serviços oferecidos pela clínica. Use quando o usuário fizer uma pergunta geral sobre o que a clínica faz.", "parameters": {"type": "object", "properties": {}}}},
+         {"type": "function", "function": {"name": "consultar_e_cancelar_inteligente", "description": "Ferramenta principal para cancelar uma consulta. Não precisa de ID.", "parameters": {"type": "object", "properties": {}}}},
+         {"type": "function", "function": {"name": "listar_todos_os_procedimentos", "description": "Lista todos os serviços e procedimentos oferecidos pela clínica. Use quando o usuário fizer uma pergunta geral sobre 'o que vocês fazem' ou 'quais serviços têm'.", "parameters": {"type": "object", "properties": {}}}},
          {"type": "function", "function": {"name": "consultar_precos_procedimentos", "description": "Consulta preços de procedimentos. Use quando o usuário perguntar 'quanto custa', 'valor', 'preço'.", "parameters": {"type": "object", "properties": {"termo_busca": {"type": "string", "description": "O procedimento que o usuário quer saber o preço."}}, "required": ["termo_busca"]}}}]
 
 # ───────────────── 5. APP FASTAPI ───────────────────────────── #
-app = FastAPI(title="OdontoBot AI", description="Automação de WhatsApp com OpenRouter e Whisper.", version="4.2.0-demo-fix")
+app = FastAPI(title="OdontoBot AI", description="Automação de WhatsApp com OpenRouter e Whisper.", version="4.3.0-demo-final")
 @app.on_event("startup")
 async def startup_event():
     await asyncio.to_thread(criar_tabelas)
@@ -176,10 +172,12 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
     paciente = buscar_ou_criar_paciente(db, tel=telefone)
     db.add(HistoricoConversa(paciente_id=paciente.id, role="user", content=mensagem_usuario)); db.commit()
     historico_recente = db.query(HistoricoConversa).filter(HistoricoConversa.paciente_id == paciente.id, HistoricoConversa.timestamp >= datetime.utcnow() - timedelta(hours=24), HistoricoConversa.role != 'system').order_by(HistoricoConversa.timestamp).all()
+    
     NOME_CLINICA, PROFISSIONAL = "DI DONATO ODONTO", "Dra. Valéria Cristina Di Donato"
     system_prompt = (f"Você é OdontoBot, assistente virtual da {NOME_CLINICA}, onde os atendimentos são realizados pela {PROFISSIONAL}. "
                      f"Seja sempre educado, prestativo e conciso. Hoje é {datetime.now().strftime('%d/%m/%Y')}. "
                      "Use as ferramentas para responder. Se pedirem conselhos médicos, recuse educadamente e diga que apenas a doutora pode fornecer essa orientação na consulta.")
+    
     mensagens_para_ia: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
     for msg in historico_recente: mensagens_para_ia.append({"role": msg.role, "content": msg.content})
 
