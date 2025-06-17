@@ -6,4 +6,3 @@ SQLAlchemy==2.0.30
 psycopg2-binary==2.9.10		
 openai==1.26.0		
 pydantic==2.7.4
-gunicorn==23.0.0
