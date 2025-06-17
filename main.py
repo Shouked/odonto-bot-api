@@ -26,7 +26,12 @@ if not all([DATABASE_URL, OPENAI_API_KEY, OPENROUTER_API_KEY, ZAPI_API_URL, ZAPI
 try:
     import openai
     openai_whisper_client = openai.OpenAI(api_key=OPENAI_API_KEY)
-    openrouter_client = openai.OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY, default_headers={"HTTP-Referer": "https://github.com/Shouked/odonto-bot-api", "X-Title": "OdontoBot AI"}, timeout=httpx.Timeout(40.0))
+    openrouter_client = openai.OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=OPENROUTER_API_KEY,
+        default_headers={"HTTP-Referer": "https://github.com/Shouked/odonto-bot-api", "X-Title": "OdontoBot AI"},
+        timeout=httpx.Timeout(40.0)
+    )
     def openrouter_chat_completion(**kw): return openrouter_client.chat.completions.create(**kw)
     async def transcrever_audio_whisper(audio_url: str) -> Optional[str]:
         try:
@@ -42,23 +47,50 @@ except ImportError as exc:
 Base = declarative_base()
 class Paciente(Base):
     __tablename__ = "pacientes"
-    id = Column(Integer, primary_key=True); nome_completo = Column(String, nullable=True); telefone = Column(String, unique=True, nullable=False); endereco = Column(String, nullable=True); email = Column(String, nullable=True); data_nascimento = Column(Date, nullable=True)
-    agendamentos = relationship("Agendamento", back_populates="paciente", cascade="all, delete-orphan"); historico = relationship("HistoricoConversa", back_populates="paciente", cascade="all, delete-orphan")
-class Agendamento(Base): __tablename__ = "agendamentos"; id, paciente_id = Column(Integer, primary_key=True), Column(Integer, ForeignKey("pacientes.id"), nullable=False); data_hora, procedimento, status = Column(DateTime, nullable=False), Column(String, nullable=False), Column(String, default="confirmado"); paciente = relationship("Paciente", back_populates="agendamentos")
-class HistoricoConversa(Base): __tablename__ = "historico_conversas"; id, paciente_id = Column(Integer, primary_key=True), Column(Integer, ForeignKey("pacientes.id"), nullable=False); role, content, timestamp = Column(String, nullable=False), Column(Text, nullable=False), Column(DateTime, default=datetime.utcnow); paciente = relationship("Paciente", back_populates="historico")
-# [ATUALIZADO] Tabela de Procedimentos com valor base
+    id = Column(Integer, primary_key=True)
+    nome_completo = Column(String, nullable=True)
+    telefone = Column(String, unique=True, nullable=False)
+    endereco = Column(String, nullable=True)
+    email = Column(String, nullable=True)
+    data_nascimento = Column(Date, nullable=True)
+    agendamentos = relationship("Agendamento", back_populates="paciente", cascade="all, delete-orphan")
+    historico = relationship("HistoricoConversa", back_populates="paciente", cascade="all, delete-orphan")
+
+class Agendamento(Base):
+    __tablename__ = "agendamentos"
+    id = Column(Integer, primary_key=True)
+    paciente_id = Column(Integer, ForeignKey("pacientes.id"), nullable=False)
+    data_hora = Column(DateTime, nullable=False)
+    procedimento = Column(String, nullable=False)
+    status = Column(String, default="confirmado")
+    paciente = relationship("Paciente", back_populates="agendamentos")
+
+class HistoricoConversa(Base):
+    __tablename__ = "historico_conversas"
+    id = Column(Integer, primary_key=True)
+    paciente_id = Column(Integer, ForeignKey("pacientes.id"), nullable=False)
+    role = Column(String, nullable=False)
+    content = Column(Text, nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    paciente = relationship("Paciente", back_populates="historico")
+
 class Procedimento(Base):
     __tablename__ = "procedimentos"
     id = Column(Integer, primary_key=True)
     nome = Column(String, unique=True, nullable=False)
     categoria = Column(String, index=True)
     valor_descritivo = Column(String, nullable=False)
-    valor_base = Column(Float, nullable=True) # Nova coluna para o preço inicial
+    valor_base = Column(Float, nullable=True)
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True); SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
-def get_db(): db = SessionLocal();_ = db;yield db;db.close()
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+def get_db():
+    db = SessionLocal()
+    try: yield db
+    finally: db.close()
+
 def criar_tabelas(): Base.metadata.create_all(bind=engine)
-# [ATUALIZADO] Função para popular a tabela de procedimentos com valor base
+
 def popular_procedimentos_iniciais(db: Session):
     if db.query(Procedimento).first(): return
     print("Populando tabela de procedimentos com valores base...", flush=True)
@@ -69,10 +101,14 @@ def popular_procedimentos_iniciais(db: Session):
         db.add(Procedimento(nome=p_data["nome"], categoria=p_data["categoria"], valor_descritivo=p_data["valor"], valor_base=valor_base))
     db.commit()
 
+# ... (Todo o resto do código, que já estava correto, continua aqui) ...
+
 # ───────────────── 4. FERRAMENTAS ──────────────────────────── #
 def buscar_ou_criar_paciente(db: Session, tel: str) -> Paciente:
     paciente = db.query(Paciente).filter_by(telefone=tel).first()
-    if not paciente: paciente = Paciente(telefone=tel); db.add(paciente); db.commit(); db.refresh(paciente)
+    if not paciente:
+        paciente = Paciente(telefone=tel)
+        db.add(paciente); db.commit(); db.refresh(paciente)
     return paciente
 def obter_proxima_etapa(db: Session, telefone_paciente: str) -> str:
     paciente = buscar_ou_criar_paciente(db, tel=telefone_paciente)
@@ -133,7 +169,6 @@ def listar_todos_os_procedimentos(db: Session, telefone_paciente: str) -> str:
     for categoria, nomes in categorias.items():
         resposta += f"*{categoria}*\n";_ = [resposta := resposta + f"- {nome}\n" for nome in nomes];resposta += "\n"
     return resposta
-# [BLINDADO] Ferramenta de preços com lógica inequívoca
 def consultar_precos_procedimentos(db: Session, telefone_paciente: str, termo_busca: str) -> str:
     termo_normalizado = re.sub(r'[-.,]', ' ', termo_busca.lower()); palavras_chave = termo_normalizado.split()
     filtros = [Procedimento.nome.ilike(f'%{palavra}%') for palavra in palavras_chave]
@@ -156,9 +191,16 @@ tools = [{"type": "function", "function": {"name": "obter_proxima_etapa", "descr
          {"type": "function", "function": {"name": "consultar_precos_procedimentos", "description": "Consulta preços de procedimentos.", "parameters": {"type": "object", "properties": {"termo_busca": {"type": "string", "description": "O procedimento para saber o preço."}}, "required": ["termo_busca"]}}}]
 
 # ───────────────── 5. APP FASTAPI ───────────────────────────── #
-app = FastAPI(title="OdontoBot AI", description="Automação de WhatsApp para DI DONATO ODONTO.", version="9.0.0-demo")
+app = FastAPI(title="OdontoBot AI", description="Automação de WhatsApp para DI DONATO ODONTO.", version="8.0.1-fix")
+
+# [CORRIGIDO] Função de startup com a sintaxe correta
 @app.on_event("startup")
-async def startup_event(): await asyncio.to_thread(criar_tabelas); print("Tabelas verificadas/criadas.", flush=True);_ = SessionLocal(); with _ as db: popular_procedimentos_iniciais(db)
+async def startup_event():
+    await asyncio.to_thread(criar_tabelas)
+    print("Tabelas verificadas/criadas.", flush=True)
+    with SessionLocal() as db:
+        popular_procedimentos_iniciais(db)
+
 @app.get("/")
 def health_get(): return {"status": "ok"}
 @app.head("/")
@@ -192,7 +234,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
     if not mensagem_usuario:
         await enviar_resposta_whatsapp(telefone, "Olá! Sou o assistente virtual da DI DONATO ODONTO. Como posso te ajudar hoje?")
         return {"status": "ignorado", "motivo": "sem conteúdo processável"}
-
+    
     paciente = buscar_ou_criar_paciente(db, tel=telefone)
     db.add(HistoricoConversa(paciente_id=paciente.id, role="user", content=mensagem_usuario)); db.commit()
     historico_recente = db.query(HistoricoConversa).filter(HistoricoConversa.paciente_id == paciente.id, HistoricoConversa.timestamp >= datetime.utcnow() - timedelta(hours=24), HistoricoConversa.role != 'system').order_by(HistoricoConversa.timestamp).all()
@@ -201,10 +243,10 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
     system_prompt = (
         f"Você é Sofia, assistente virtual da {NOME_CLINICA}, onde os atendimentos são realizados pela {PROFISSIONAL}. "
         f"Seja sempre educado, prestativo e converse de forma natural. Hoje é {datetime.now().strftime('%d/%m/%Y')}. "
-        "Determine a intenção do usuário. Se for sobre AGENDAR, CANCELAR ou REAGENDAR, use a ferramenta `obter_proxima_etapa` para iniciar o fluxo de onboarding. "
-        "Siga as instruções da ferramenta `obter_proxima_etapa` para coletar dados faltantes, UM DE CADA VEZ. "
-        "Quando o cadastro estiver completo, use as outras ferramentas para atender o pedido do usuário (agendar, consultar preços, etc.). "
-        "Antes de agendar, sempre confirme com um resumo: 'Posso confirmar seu agendamento de [Procedimento] para [Data] às [Hora] com a {PROFISSIONAL}?'. Só agende após a confirmação."
+        "Se o usuário quiser AGENDAR, CANCELAR ou REAGENDAR, seu primeiro passo é usar a ferramenta `obter_proxima_etapa` para saber se precisa coletar dados do paciente. "
+        "Siga o retorno da ferramenta `obter_proxima_etapa` para guiar o paciente pelo cadastro, UM DADO POR VEZ. "
+        "Quando o cadastro estiver completo, a ferramenta irá te instruir a prosseguir com o agendamento. "
+        "Antes de marcar, sempre apresente um resumo claro: 'Posso confirmar seu agendamento de [Procedimento] para [Data] às [Hora] com a {PROFISSIONAL}?' e espere a confirmação do usuário para chamar a ferramenta `agendar_consulta`."
     )
     
     mensagens_para_ia: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
