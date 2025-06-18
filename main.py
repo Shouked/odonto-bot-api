@@ -3,7 +3,7 @@ API principal do OdontoBot AI. Versão Final de Produção.
 """
 
 import os, json, asyncio, re
-from datetime import datetime, timedelta, time, date as DateObject # Renomeado para evitar conflito
+from datetime import datetime, timedelta, time, date as DateObject 
 from typing import Optional, Dict, Any, List
 import httpx, pytz
 from dotenv import load_dotenv
@@ -26,7 +26,6 @@ BR_TIMEZONE = pytz.timezone("America/Sao_Paulo")
 def get_now() -> datetime: return datetime.now(BR_TIMEZONE)
 def get_today_br() -> DateObject: return get_now().date()
 def get_tomorrow_br_str() -> str: return (get_now() + timedelta(days=1)).strftime("%Y-%m-%d")
-
 
 # ───────────────── 2. CONFIGURAÇÃO DOS CLIENTES DE IA ───────── #
 try:
@@ -51,7 +50,11 @@ class Paciente(Base):
 class Agendamento(Base): __tablename__ = "agendamentos"; id, paciente_id = Column(Integer, primary_key=True), Column(Integer, ForeignKey("pacientes.id"), nullable=False); data_hora, procedimento, status = Column(DateTime(timezone=True), nullable=False), Column(String, nullable=False), Column(String, default="confirmado"); paciente = relationship("Paciente", back_populates="agendamentos")
 class HistoricoConversa(Base): __tablename__ = "historico_conversas"; id, paciente_id = Column(Integer, primary_key=True), Column(Integer, ForeignKey("pacientes.id"), nullable=False); role, content, timestamp = Column(String, nullable=False), Column(Text, nullable=False), Column(DateTime(timezone=True), default=get_now); paciente = relationship("Paciente", back_populates="historico")
 class Procedimento(Base): __tablename__ = "procedimentos"; id = Column(Integer, primary_key=True); nome = Column(String, unique=True, nullable=False); categoria = Column(String, index=True); valor_descritivo = Column(String, nullable=False); valor_base = Column(Float, nullable=True)
-engine = create_engine(DATABASE_URL); SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+# [ATUALIZADO] Configuração do Engine com pool_recycle
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=300)
+SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
 def get_db(): db = SessionLocal();_ = db;yield db;db.close()
 def criar_tabelas(): Base.metadata.create_all(bind=engine)
 def popular_procedimentos_iniciais(db: Session):
@@ -218,7 +221,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
         "1. **Seja Reativa para Informações:** Se o usuário pedir preços, use `consultar_precos_procedimentos`. Se perguntar sobre quais serviços oferecemos, use `listar_todos_os_procedimentos`. Você PODE e DEVE fazer isso ANTES de qualquer cadastro.\n"
         "2. **Inicie o Cadastro na Hora Certa:** SOMENTE quando o usuário expressar uma intenção clara de AGENDAR, REAGENDAR ou CANCELAR, você DEVE usar a ferramenta `verificar_e_coletar_dados_paciente`. Informe que precisa dos dados para prosseguir com a ação (agendar, etc.).\n"
         "3. **Coleta de Dados Inteligente:** A ferramenta `verificar_e_coletar_dados_paciente` te dirá qual o próximo dado faltante. Peça esse dado ao usuário. Se o usuário fornecer um dado diferente, use a ferramenta novamente passando o dado que ele forneceu (ela vai salvar o que for útil e te dizer o próximo passo).\n"
-        "4. **Agendamento Detalhado:** Quando o cadastro estiver completo, pergunte o procedimento desejado e o DIA para agendamento. Use `consultar_horarios_disponiveis` para aquele dia. Após o usuário escolher um horário livre, apresente um resumo: 'Posso confirmar [Procedimento] para [Dia] às [Hora] com a {PROFISSIONAL}?' SÓ APÓS o 'sim' do usuário, use a ferramenta `agendar_consulta`.\n"
+        "4. **Agendamento Detalhado:** Quando o cadastro estiver completo, pergunte o procedimento desejado e o DIA para agendamento. Use `consultar_horarios_disponiveis` para aquele dia. Após o usuário escolher um horário livre, apresente um resumo claro: 'Posso confirmar [Procedimento] para [Dia] às [Hora] com a {PROFISSIONAL}?' SÓ APÓS o 'sim' do usuário, use a ferramenta `agendar_consulta`.\n"
         "5. **Reagendamento Inteligente:** Se o usuário quiser reagendar: (a) Primeiro, use `consultar_meus_agendamentos` para listar os agendamentos existentes. (b) Se houver um único agendamento, pergunte o novo dia e hora e use `reagendar_consulta_inteligente` com o ID daquele agendamento. (c) Se houver vários, mostre a lista e peça o ID do agendamento a ser alterado antes de usar a ferramenta.\n"
         "6. **Cancelamento Flexível:** Se o usuário quiser cancelar: (a) Use `consultar_meus_agendamentos`. (b) Se houver apenas UM agendamento, confirme com o usuário ('Gostaria de cancelar seu agendamento de [Procedimento] para [Data]?') e, após o 'sim', use `cancelar_agendamentos` fornecendo uma lista com o ID daquele agendamento. (c) Se houver VÁRIOS, mostre a lista e peça o ID ou os IDs dos agendamentos a serem cancelados para usar na ferramenta."
     )
