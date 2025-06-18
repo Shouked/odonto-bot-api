@@ -58,38 +58,32 @@ def popular_procedimentos_iniciais(db: Session):
     db.commit()
 
 # ───────────────── 4. FERRAMENTAS (ARQUITETURA FINAL) ─────────── #
-# [CORRIGIDO] Função auxiliar restaurada para uso global
-def buscar_ou_criar_paciente(db: Session, tel: str) -> Paciente:
-    paciente = db.query(Paciente).filter_by(telefone=tel).first()
-    if not paciente:
-        paciente = Paciente(telefone=tel)
-        db.add(paciente); db.commit(); db.refresh(paciente)
-    return paciente
-
-def listar_todos_os_procedimentos(db: Session) -> str:
-    procedimentos = db.query(Procedimento).order_by(Procedimento.categoria, Procedimento.nome).all()
-    if not procedimentos: return "Não consegui encontrar a lista de procedimentos no momento."
-    categorias = defaultdict(list);_ = [categorias[p.categoria].append(p.nome) for p in procedimentos]
-    resposta = "Oferecemos uma ampla gama de serviços! Nossos procedimentos incluem:\n\n"
-    for categoria, nomes in categorias.items():
-        resposta += f"*{categoria}*\n" + "\n".join(f"- {n}" for n in nomes) + "\n\n"
-    return resposta.strip()
-
-def consultar_precos_procedimentos(db: Session, termo_busca: str) -> str:
-    termo_normalizado = re.sub(r'[-.,]', ' ', termo_busca.lower()); palavras_chave = termo_normalizado.split()
-    filtros = [Procedimento.nome.ilike(f'%{palavra}%') for palavra in palavras_chave]
-    resultados = db.query(Procedimento).filter(and_(*filtros)).all()
-    if not resultados: return f"Não encontrei informações de valores para '{termo_busca}'."
-    respostas = [f"O valor para {r.nome} é a partir de R$ {int(r.valor_base):,}.00".replace(",", ".") if r.valor_base else f"Para {r.nome}, o valor é {r.valor_descritivo}" for r in resultados]
-    return "\n".join(respostas)
-
-# [NOVO] Ferramenta central que comanda todo o fluxo lógico
-def processar_solicitacao_agendamento(db: Session, telefone_paciente: str, intencao_usuario: str, dados_brutos: Optional[Dict[str, Any]] = None) -> str:
-    paciente = buscar_ou_criar_paciente(db, tel=telefone_paciente)
+def processar_solicitacao(db: Session, telefone_paciente: str, intencao_usuario: str, dados_brutos: Optional[Dict[str, Any]] = None) -> str:
+    paciente = db.query(Paciente).filter_by(telefone=telefone_paciente).first()
+    if not paciente: paciente = Paciente(telefone=telefone_paciente); db.add(paciente); db.commit(); db.refresh(paciente)
     dados_brutos = dados_brutos or {}
 
-    # FLUXO DE COLETA DE DADOS (ONBOARDING)
-    if intencao_usuario == "coletar_dados":
+    # FLUXO DE INFORMAÇÕES (PODE OCORRER A QUALQUER MOMENTO)
+    if intencao_usuario == "listar_procedimentos":
+        procedimentos = db.query(Procedimento).order_by(Procedimento.categoria, Procedimento.nome).all()
+        if not procedimentos: return "Não consegui encontrar a lista de procedimentos no momento."
+        categorias = defaultdict(list);_ = [categorias[p.categoria].append(p.nome) for p in procedimentos]
+        resposta = "Oferecemos uma ampla gama de serviços! Nossos procedimentos incluem:\n\n"
+        for categoria, nomes in categorias.items(): resposta += f"*{categoria}*\n" + "\n".join(f"- {n}" for n in nomes) + "\n\n"
+        return resposta.strip()
+
+    if intencao_usuario == "consultar_precos":
+        termo_busca = dados_brutos.get("termo_busca", "")
+        if not termo_busca: return "Ação: Pergunte qual procedimento o usuário gostaria de saber o preço."
+        termo_normalizado = re.sub(r'[-.,]', ' ', termo_busca.lower()); palavras_chave = termo_normalizado.split()
+        filtros = [Procedimento.nome.ilike(f'%{palavra}%') for palavra in palavras_chave]
+        resultados = db.query(Procedimento).filter(and_(*filtros)).all()
+        if not resultados: return f"Não encontrei informações de valores para '{termo_busca}'."
+        respostas = [f"O valor para {r.nome} é a partir de R$ {int(r.valor_base):,}.00".replace(",", ".") if r.valor_base else f"Para {r.nome}, o valor é {r.valor_descritivo}" for r in resultados]
+        return "\n".join(respostas)
+    
+    # FLUXO DE CADASTRO (É ACIONADO QUANDO NECESSÁRIO)
+    if intencao_usuario == "agendar" or (dados_brutos and any(dados_brutos.values())):
         if nome := dados_brutos.get("nome_completo"): paciente.nome_completo = nome
         if email := dados_brutos.get("email"): paciente.email = email
         if endereco := dados_brutos.get("endereco"): paciente.endereco = endereco
@@ -99,50 +93,43 @@ def processar_solicitacao_agendamento(db: Session, telefone_paciente: str, inten
             else: return "Ação: Peça a data de nascimento novamente, o formato parece inválido. Use DD/MM/AAAA."
         db.commit()
 
-    dados_faltantes = [campo for campo, valor in [("nome completo", paciente.nome_completo), ("data de nascimento", paciente.data_nascimento), ("e-mail", paciente.email), ("endereço completo com CEP", paciente.endereco)] if not valor]
-    if dados_faltantes and intencao_usuario in ["agendar", "reagendar", "cancelar", "coletar_dados"]:
-        return f"Ação: Continue o cadastro. O próximo dado a ser solicitado é: {dados_faltantes[0]}. Peça de forma natural e explique que é para a ação solicitada."
-    if not dados_faltantes and intencao_usuario == "coletar_dados":
-        return f"Cadastro de {paciente.nome_completo} concluído com sucesso! Ação: Pergunte como pode ajudar agora (agendar, etc.)."
-    
-    # ... Lógica de agendamento, reagendamento e cancelamento vai aqui ...
+        dados_faltantes = [campo for campo, valor in [("nome completo", paciente.nome_completo), ("data de nascimento", paciente.data_nascimento), ("e-mail", paciente.email), ("endereço completo com CEP", paciente.endereco)] if not valor]
+        if dados_faltantes:
+            return f"Ação: Continue o cadastro. O próximo dado a ser solicitado é: {dados_faltantes[0]}. Peça de forma natural."
+        
+        # Se chegou aqui, o cadastro está completo
+        if intencao_usuario == "agendar":
+            procedimento = dados_brutos.get("procedimento")
+            if not procedimento: return "Ação: Cadastro completo! Agora pergunte qual procedimento o paciente deseja agendar."
+            
+            # (O resto da lógica de agendamento, reagendamento, etc., iria aqui)
     
     return "Ação: Converse naturalmente. Se não entendeu, peça para o usuário reformular a pergunta."
 
-available_functions = {"processar_solicitacao_agendamento": processar_solicitacao_agendamento, "listar_todos_os_procedimentos": listar_todos_os_procedimentos, "consultar_precos_procedimentos": consultar_precos_procedimentos}
-tools = [
-    {"type": "function", "function": {"name": "processar_solicitacao_agendamento", "description": "Ferramenta central e OBRIGATÓRIA para processar a mensagem do usuário. Extraia a intenção e qualquer dado relevante e passe para esta função.", "parameters": {"type": "object", "properties": {"intencao_usuario": {"type": "string", "enum": ["agendar", "reagendar", "cancelar", "coletar_dados", "outro"]}, "dados_brutos": {"type": "object", "properties": {"procedimento": {"type": "string"}, "data_hora_texto": {"type": "string"}, "confirmacao_usuario": {"type": "boolean"}, "nome_completo": {"type": "string"}, "email": {"type": "string"}, "data_nascimento": {"type": "string"}, "endereco": {"type": "string"}},"description": "Dados extraídos da mensagem do usuário."}}, "required": ["intencao_usuario"]}}},
-    {"type": "function", "function": {"name": "listar_todos_os_procedimentos", "description": "Use quando o usuário fizer uma pergunta geral sobre 'o que vocês fazem' ou 'quais serviços têm'.", "parameters": {"type": "object", "properties": {}}}},
-    {"type": "function", "function": {"name": "consultar_precos_procedimentos", "description": "Use quando o usuário perguntar 'quanto custa', 'valor' ou 'preço' de qualquer procedimento.", "parameters": {"type": "object", "properties": {"termo_busca": {"type": "string", "description": "O procedimento para saber o preço."}}, "required": ["termo_busca"]}}}
-]
-
-# ───────────────── 5. APP FASTAPI ───────────────────────────── #
-app = FastAPI(title="OdontoBot AI", description="Automação de WhatsApp para DI DONATO ODONTO.", version="14.0.1-final")
-
+# ───────────────── 5. APP FASTAPI E FERRAMENTAS ─────────────── #
+app = FastAPI(title="OdontoBot AI", description="Automação de WhatsApp para DI DONATO ODONTO.", version="14.1.0-stable")
+available_functions = {"processar_solicitacao": processar_solicitacao}
+tools = [{"type": "function", "function": {"name": "processar_solicitacao", "description": "Ferramenta central e OBRIGATÓRIA para processar a mensagem do usuário. Extraia a intenção e qualquer dado relevante (nome, data, procedimento, etc.) e passe para esta função.", "parameters": {"type": "object", "properties": {"intencao_usuario": {"type": "string", "enum": ["agendar", "reagendar", "cancelar", "listar_procedimentos", "consultar_precos", "coletar_dados", "saudacao", "outro"]}, "dados_brutos": {"type": "object", "properties": {"procedimento": {"type": "string"}, "termo_busca": {"type": "string"}, "data_hora_texto": {"type": "string"}, "confirmacao_usuario": {"type": "boolean"}, "nome_completo": {"type": "string"}, "email": {"type": "string"}, "data_nascimento": {"type": "string"}, "endereco": {"type": "string"}},"description": "Dados extraídos da mensagem do usuário."}}, "required": ["intencao_usuario"]}}}]
 @app.on_event("startup")
 async def startup_event():
     await asyncio.to_thread(criar_tabelas)
-    with SessionLocal() as db:
-        popular_procedimentos_iniciais(db)
-
+    with SessionLocal() as db: popular_procedimentos_iniciais(db)
 @app.get("/")
 def health_get(): return {"status": "ok"}
 @app.head("/")
 def health_head(): return Response(status_code=200)
 
-# ───────────────── 6. MODELOS DE PAYLOAD ───────────────────── #
+# ───────────────── 6. MODELOS DE PAYLOAD E UTIL ─────────────── #
 class ZapiText(BaseModel): message: Optional[str] = None
 class ZapiAudio(BaseModel): audioUrl: Optional[str] = None
 class ZapiWebhookPayload(BaseModel): phone: str; text: Optional[ZapiText] = None; audio: Optional[ZapiAudio] = None
-
-# ───────────────── 7. UTIL ──────────────────────────────────── #
 async def enviar_resposta_whatsapp(telefone: str, mensagem: str):
     url = f"{ZAPI_API_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"; payload = {"phone": telefone, "message": mensagem}; headers = {"Content-Type": "application/json", "Client-Token": ZAPI_CLIENT_TOKEN}
     async with httpx.AsyncClient(timeout=30) as client:
         try: r = await client.post(url, json=payload, headers=headers); r.raise_for_status()
         except Exception as exc: print("Falha ao enviar para Z-API:", exc, flush=True)
 
-# ───────────────── 8. WEBHOOK ───────────────────── #
+# ───────────────── 7. WEBHOOK ───────────────────── #
 @app.post("/whatsapp/webhook")
 async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
     raw = await request.json(); print(">>> PAYLOAD RECEBIDO:", raw, flush=True)
@@ -159,20 +146,21 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
         await enviar_resposta_whatsapp(telefone, f"Olá! Sou a Sofia, assistente virtual da DI DONATO ODONTO. Como posso te ajudar hoje?")
         return {"status": "saudacao_enviada"}
     
-    paciente = buscar_ou_criar_paciente(db, tel=telefone) # [CORRIGIDO] Chamada válida
+    paciente = db.query(Paciente).filter_by(telefone=telefone).first()
+    if not paciente: paciente = Paciente(telefone=telefone); db.add(paciente); db.commit(); db.refresh(paciente)
     db.add(HistoricoConversa(paciente_id=paciente.id, role="user", content=mensagem_usuario)); db.commit()
     historico_recente = db.query(HistoricoConversa).filter(HistoricoConversa.paciente_id == paciente.id, HistoricoConversa.timestamp >= get_now() - timedelta(hours=24), HistoricoConversa.role != 'system').order_by(HistoricoConversa.timestamp).all()
     
     NOME_CLINICA, PROFISSIONAL = "DI DONATO ODONTO", "Dra. Valéria Cristina Di Donato"
     system_prompt = (
         f"**Persona:** Você é a Sofia, assistente virtual da clínica {NOME_CLINICA}. Seja sempre educada e prestativa. Hoje é {get_now().strftime('%d/%m/%Y')}.\n\n"
-        "**Sua Tarefa:** Seu único trabalho é entender a intenção do usuário e os dados na mensagem dele, e então chamar a ferramenta apropriada. Se for uma ação complexa (agendar, cadastrar), use `processar_solicitacao_agendamento`. Se for uma pergunta simples, use as ferramentas de consulta. A ferramenta te dirá o que fazer ou o que responder."
+        "**Sua Tarefa:** Haja como se fosse uma atendente humana de uma clínica odontológica com anos de experiencia. Seu único trabalho é entender a intenção do usuário e os dados na mensagem dele, e então chamar a ferramenta `processar_solicitacao`. A ferramenta te dirá o que fazer ou o que responder. Se a ferramenta retornar 'Ação: ...', formule uma resposta amigável que execute essa ação. Se ela retornar uma informação, entregue-a ao usuário."
     )
     
     mensagens_para_ia: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
     for msg in historico_recente: mensagens_para_ia.append({"role": msg.role, "content": msg.content})
     try:
-        modelo_chat = "google/gemini-2.5-pro"
+        modelo_chat = "google/gemini-flash-2.5-flash"
         resp = openrouter_chat_completion(model=modelo_chat, messages=mensagens_para_ia, tools=tools, tool_choice="auto")
         ai_msg = resp.choices[0].message
         while ai_msg.tool_calls:
@@ -181,10 +169,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                 fname, f_args = call.function.name, json.loads(call.function.arguments)
                 func = available_functions.get(fname)
                 if not func: raise HTTPException(500, f"Função desconhecida: {fname}")
-                # Passa o telefone apenas para a ferramenta principal que precisa dele
-                if fname == "processar_solicitacao_agendamento":
-                    f_args["telefone_paciente"] = telefone
-                result = func(db=db, **f_args)
+                result = func(db=db, telefone_paciente=telefone, **f_args) if fname == "processar_solicitacao" else func(db=db, **f_args)
                 msgs_com_ferramentas.append({"tool_call_id": call.id, "role": "tool", "name": fname, "content": result})
             resp = openrouter_chat_completion(model=modelo_chat, messages=msgs_com_ferramentas)
             ai_msg = resp.choices[0].message
