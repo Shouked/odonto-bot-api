@@ -259,7 +259,11 @@ def processar_solicitacao_agendamento(
         ("endereço", paciente.endereco),
     ] if not v]
     if pendentes:
-        return f"Ação: Solicite {pendentes[0]}."
+    # peça o próximo campo sem repetir “finalizar cadastro”
+    return (
+        "Ação: Solicite {campo} de forma natural e sem mencionar que está finalizando "
+        "o cadastro."
+    ).format(campo=pendentes[0])
 
     ags = db.query(Agendamento).filter(
         Agendamento.paciente_id==paciente.id,
@@ -404,8 +408,9 @@ async def webhook(req: Request, db: Session = Depends(get_db)) -> Dict[str,Any]:
     hist=db.query(HistoricoConversa).filter(
         HistoricoConversa.paciente_id==paciente.id, HistoricoConversa.timestamp>=now_tz()-timedelta(hours=24),
         HistoricoConversa.role!="system").order_by(HistoricoConversa.timestamp).all()
-    sys_prompt=("Você é Sofia, assistente virtual da clínica DI DONATO ODONTO (Dra. Valéria Cristina). "
+    sys_prompt=("Você é Sofia, assistente virtual da clínica Di Didonato Odontoloa (Dra. Valéria Cristina). "
                 "Responda em português BR e use as ferramentas fornecidas. "
+"Evite repetir frases como 'para finalizar seu cadastro'; peça cada dado de forma natural e diferente. "
                 "Converta expressões como 'amanhã' ou 'próxima sexta' em datas absolutas "
                 "e confirme DD/MM/AAAA + horário antes de criar um agendamento.")
     msgs=[{"role":"system","content":sys_prompt}]+[
@@ -425,7 +430,7 @@ async def webhook(req: Request, db: Session = Depends(get_db)) -> Dict[str,Any]:
                 if "telefone_paciente" in fn.__code__.co_varnames: kwargs["telefone_paciente"]=tel
                 result=fn(**kwargs,**args)
                 msgs2.append({"tool_call_id":call.id,"role":"tool","name":call.function.name,"content":result})
-            resp=chat_completion(model="google/gemini-2.5-flash-preview-05-20",
+            resp=chat_completion(model="google/gemini-2.5-pro",
                                  messages=msgs2,temperature=0.2,top_p=0.8,max_tokens=1024)
             ai_msg=resp.choices[0].message  # type: ignore[index]
         final=limpar_rotulos(ai_msg.content or "")
