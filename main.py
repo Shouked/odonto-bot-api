@@ -1,615 +1,435 @@
 """
-API principal do OdontoBot AI — versão 14.0.4
+API principal do OdontoBot AI — versão 14.0.5
 ----------------------------------------------------------------
-Histórico de correções importantes
-• 14.0.1 – remove rótulos “Ação/Resumo” e grava horários naïve
-• 14.0.2 – parse determinístico de data de nascimento
-• 14.0.3 – salva nome completo e lista todos os horários
-• 14.0.4 – busca de preços agora usa OR (tolerante) e ranqueia resultados
+Novidades:
+• normalizar_data_relativa → entende “amanhã”, “próxima sexta”, etc.
+• listar_agendamentos_ativos → IA pode confirmar/cancelar sem se confundir
+• Proteção para não tratar endereço como data_hora_texto
+• Prompt reforçado para confirmar datas e evitar repetições
+• Mantém correções 14.0.1 → 14.0.4 (rótulos, horários naïve, nome completo, busca OR)
 """
 
 from __future__ import annotations
 
-import asyncio
-import calendar
-import json
-import os
-import re
+import asyncio, calendar, json, os, re
 from collections import defaultdict
-from datetime import datetime, timedelta, time, date as DateObject
+from datetime import datetime, timedelta, time
 from typing import Any, Dict, List, Optional
 
-import httpx
-import pytz
+import httpx, pytz
 from dateparser import parse as parse_date
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import (
-    Column,
-    Date,
-    DateTime,
-    Float,
-    ForeignKey,
-    Integer,
-    String,
-    Text,
-    and_,
-    or_,            # ← novo import para busca “OR”
-    create_engine,
+    Column, Date, DateTime, Float, ForeignKey, Integer, String, Text,
+    and_, or_, create_engine
 )
 from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
 
-# ───────────────────────────── 1. ENV / VARS ────────────────────────────── #
+# ────────────────────────── 1. ENV / CONSTS ─────────────────────────────── #
 load_dotenv()
 (
-    DATABASE_URL,
-    OPENAI_API_KEY,
-    OPENROUTER_API_KEY,
-    ZAPI_API_URL,
-    ZAPI_INSTANCE_ID,
-    ZAPI_TOKEN,
-    ZAPI_CLIENT_TOKEN,
+    DATABASE_URL, OPENAI_API_KEY, OPENROUTER_API_KEY,
+    ZAPI_API_URL, ZAPI_INSTANCE_ID, ZAPI_TOKEN, ZAPI_CLIENT_TOKEN
 ) = (
-    os.getenv("DATABASE_URL"),
-    os.getenv("OPENAI_API_KEY"),
-    os.getenv("OPENROUTER_API_KEY"),
-    os.getenv("ZAPI_API_URL"),
-    os.getenv("ZAPI_INSTANCE_ID"),
-    os.getenv("ZAPI_TOKEN"),
-    os.getenv("ZAPI_CLIENT_TOKEN"),
+    os.getenv("DATABASE_URL"), os.getenv("OPENAI_API_KEY"), os.getenv("OPENROUTER_API_KEY"),
+    os.getenv("ZAPI_API_URL"), os.getenv("ZAPI_INSTANCE_ID"), os.getenv("ZAPI_TOKEN"), os.getenv("ZAPI_CLIENT_TOKEN")
 )
-if not all(
-    [
-        DATABASE_URL,
-        OPENAI_API_KEY,
-        OPENROUTER_API_KEY,
-        ZAPI_API_URL,
-        ZAPI_INSTANCE_ID,
-        ZAPI_TOKEN,
-        ZAPI_CLIENT_TOKEN,
-    ]
-):
-    raise RuntimeError("Alguma variável de ambiente obrigatória não foi definida.")
+if not all([DATABASE_URL, OPENAI_API_KEY, OPENROUTER_API_KEY, ZAPI_API_URL,
+            ZAPI_INSTANCE_ID, ZAPI_TOKEN, ZAPI_CLIENT_TOKEN]):
+    raise RuntimeError("Variável de ambiente faltando.")
 
-BR_TIMEZONE = pytz.timezone("America/Sao_Paulo")
+BR_TZ = pytz.timezone("America/Sao_Paulo")
 
-def get_now() -> datetime:
-    return datetime.now(BR_TIMEZONE)
-
-# utilidades naïve (sem tzinfo) ─────────────────────────────────────────── #
-def get_now_naive() -> datetime:
-    return datetime.now(BR_TIMEZONE).replace(tzinfo=None)
-
+def now_tz() -> datetime:          return datetime.now(BR_TZ)
+def now_naive() -> datetime:       return datetime.now(BR_TZ).replace(tzinfo=None)
 def to_naive_sp(dt: datetime) -> datetime:
-    if dt.tzinfo is None:
-        dt = BR_TIMEZONE.localize(dt)
-    else:
-        dt = dt.astimezone(BR_TIMEZONE)
-    return dt.replace(tzinfo=None)
+    return (BR_TZ.localize(dt) if dt.tzinfo is None else dt.astimezone(BR_TZ)).replace(tzinfo=None)
 
-BUSINESS_START = time(hour=9)
-BUSINESS_END = time(hour=17)
-SLOT_MINUTES = 30
+BUSINESS_START, BUSINESS_END, SLOT_MIN = time(9), time(17), 30
 
-# ────────────────────────────── 2. IA CLIENTS ───────────────────────────── #
+# ────────────────────────── 2. OPENAI / OPENROUTER ───────────────────────── #
 try:
     import openai  # type: ignore
-
-    openai_whisper_client = openai.OpenAI(api_key=OPENAI_API_KEY)
-    openrouter_client = openai.OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=OPENROUTER_API_KEY,
+    openai_whisper = openai.OpenAI(api_key=OPENAI_API_KEY)
+    openrouter = openai.OpenAI(
+        base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY,
         default_headers={
             "HTTP-Referer": "https://github.com/Shouked/odonto-bot-api",
             "X-Title": "OdontoBot AI",
         },
         timeout=httpx.Timeout(45.0),
     )
-
-    def openrouter_chat_completion(**kw):
-        return openrouter_client.chat.completions.create(**kw)
-
-    async def transcrever_audio_whisper(audio_url: str) -> Optional[str]:
+    def chat_completion(**kw): return openrouter.chat.completions.create(**kw)
+    async def transcrever_audio(url: str) -> Optional[str]:
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(audio_url, timeout=30)
-                resp.raise_for_status()
-                audio_bytes = resp.content
-            transcription = await asyncio.to_thread(
-                openai_whisper_client.audio.transcriptions.create,
-                model="whisper-1",
-                file=("audio.ogg", audio_bytes, "audio/ogg"),
-            )
-            return transcription.text  # type: ignore[attr-defined]
-        except Exception as exc:  # noqa: BLE001
-            print(f"Erro ao transcrever áudio: {exc}", flush=True)
-            return None
+            async with httpx.AsyncClient(timeout=30) as c: data = (await c.get(url)).content
+            tr = await asyncio.to_thread(openai_whisper.audio.transcriptions.create,
+                                         model="whisper-1", file=("audio.ogg", data, "audio/ogg"))
+            return tr.text  # type: ignore[attr-defined]
+        except Exception as e:
+            print("Erro whisper:", e); return None
+except ImportError as e:
+    raise RuntimeError("openai não instalado") from e
 
-except ImportError as exc:  # noqa: BLE001
-    raise RuntimeError("Pacote 'openai' não instalado.") from exc
-
-# ────────────────────────────── 3. DATABASE ─────────────────────────────── #
+# ────────────────────────── 3. SQLALCHEMY MODELS ─────────────────────────── #
 Base = declarative_base()
-
 class Paciente(Base):
     __tablename__ = "pacientes"
-    id                = Column(Integer, primary_key=True)
-    nome_completo     = Column(String)
-    telefone          = Column(String, unique=True, nullable=False)
-    endereco          = Column(String)
-    email             = Column(String)
-    data_nascimento   = Column(Date)
-    agendamentos      = relationship("Agendamento", back_populates="paciente", cascade="all, delete-orphan")
-    historico         = relationship("HistoricoConversa", back_populates="paciente", cascade="all, delete-orphan")
-
+    id = Column(Integer, primary_key=True); nome_completo = Column(String)
+    telefone = Column(String, unique=True, nullable=False)
+    endereco, email = Column(String), Column(String)
+    data_nascimento = Column(Date)
+    agendamentos = relationship("Agendamento", back_populates="paciente", cascade="all, delete-orphan")
+    historico    = relationship("HistoricoConversa", back_populates="paciente", cascade="all, delete-orphan")
 class Agendamento(Base):
     __tablename__ = "agendamentos"
-    id            = Column(Integer, primary_key=True)
-    paciente_id   = Column(Integer, ForeignKey("pacientes.id"), nullable=False)
-    data_hora     = Column(DateTime(timezone=False), nullable=False)
-    procedimento  = Column(String, nullable=False)
-    status        = Column(String, default="confirmado")
-    paciente      = relationship("Paciente", back_populates="agendamentos")
-
+    id = Column(Integer, primary_key=True)
+    paciente_id = Column(Integer, ForeignKey("pacientes.id"), nullable=False)
+    data_hora = Column(DateTime(timezone=False), nullable=False)
+    procedimento = Column(String, nullable=False); status = Column(String, default="confirmado")
+    paciente = relationship("Paciente", back_populates="agendamentos")
 class HistoricoConversa(Base):
     __tablename__ = "historico_conversas"
-    id            = Column(Integer, primary_key=True)
-    paciente_id   = Column(Integer, ForeignKey("pacientes.id"), nullable=False)
-    role          = Column(String, nullable=False)
-    content       = Column(Text, nullable=False)
-    timestamp     = Column(DateTime(timezone=True), default=get_now)
-    paciente      = relationship("Paciente", back_populates="historico")
-
+    id = Column(Integer, primary_key=True)
+    paciente_id = Column(Integer, ForeignKey("pacientes.id"), nullable=False)
+    role = Column(String, nullable=False); content = Column(Text, nullable=False)
+    timestamp = Column(DateTime(timezone=True), default=now_tz)
+    paciente = relationship("Paciente", back_populates="historico")
 class Procedimento(Base):
     __tablename__ = "procedimentos"
-    id               = Column(Integer, primary_key=True)
-    nome             = Column(String, unique=True, nullable=False)
-    categoria        = Column(String, index=True)
-    valor_descritivo = Column(String, nullable=False)
-    valor_base       = Column(Float)
+    id = Column(Integer, primary_key=True); nome = Column(String, unique=True, nullable=False)
+    categoria = Column(String, index=True)
+    valor_descritivo = Column(String, nullable=False); valor_base = Column(Float)
 
 engine = create_engine(DATABASE_URL, pool_recycle=300)
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+def get_db(): db = SessionLocal();  try: yield db; finally: db.close()
+def create_tables(): Base.metadata.create_all(bind=engine)
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-def criar_tabelas() -> None:
-    Base.metadata.create_all(bind=engine)
-
-# ─────────────────── 3.1 POPULATE PROCEDIMENTOS (mesma lista) ────────────── #
-def popular_procedimentos_iniciais(db: Session) -> None:
-    if db.query(Procedimento).first():
-        return
-    procedimentos_data = [
-        {"categoria": "Procedimentos Básicos", "nome": "Consulta diagnóstica", "valor": "R$100 a R$162"},
-        {"categoria": "Radiografias", "nome": "Raio-X periapical ou bite-wing", "valor": "R$15 a R$34"},
-        {"categoria": "Radiografias", "nome": "Raio-X Panorâmica", "valor": "R$57 a R$115"},
-        {"categoria": "Procedimentos Básicos", "nome": "Limpeza simples (Profilaxia)", "valor": "R$100 a R$400"},
-        {"categoria": "Restaurações (Obturações)", "nome": "Restauração de Resina (1 face)", "valor": "a partir de R$100"},
-        {"categoria": "Restaurações (Obturações)", "nome": "Restauração de Resina (2 faces)", "valor": "a partir de R$192"},
-        {"categoria": "Endodontia (Canal)", "nome": "Tratamento de Canal (Incisivo/Canino)", "valor": "R$517 a R$630"},
-        {"categoria": "Endodontia (Canal)", "nome": "Tratamento de Canal (Pré-molar/Molar)", "valor": "R$432 a R$876"},
-        {"categoria": "Exodontia (Cirúrgicos)", "nome": "Extração simples de dente permanente", "valor": "R$150 a R$172"},
-        {"categoria": "Exodontia (Cirúrgicos)", "nome": "Extração de dente de leite", "valor": "R$96 a R$102"},
-        {"categoria": "Exodontia (Cirúrgicos)", "nome": "Extração de dente incluso/impactado", "valor": "R$364 a R$390"},
-        {"categoria": "Próteses e Coroas", "nome": "Coroa provisória", "valor": "R$150 a R$268"},
-        {"categoria": "Próteses e Coroas", "nome": "Coroa metalo-cerâmica", "valor": "R$576 a R$600"},
-        {"categoria": "Próteses e Coroas", "nome": "Coroa cerâmica pura", "valor": "R$576 a R$605"},
-        {"categoria": "Clareamento Dentário", "nome": "Clareamento caseiro (por arcada)", "valor": "R$316 a R$330"},
-        {"categoria": "Clareamento Dentário", "nome": "Clareamento em consultório (por arcada)", "valor": "R$316 a R$330"},
-        {"categoria": "Implantes / Cirurgias", "nome": "Implante dentário unitário", "valor": "a partir de R$576"},
-        {"categoria": "Implantes / Cirurgias", "nome": "Enxertos ósseos", "valor": "R$200 a R$800"},
-        {"categoria": "Implantes / Cirurgias", "nome": "Levantamento de seio maxilar", "valor": "R$576 a R$800"},
+# ─────────────────────── 3.1 PROCEDIMENTOS INICIAIS ──────────────────────── #
+def seed_procedimentos(db: Session) -> None:
+    if db.query(Procedimento).first(): return
+    lista = [
+        ("Procedimentos Básicos", "Consulta diagnóstica", "R$100 a R$162"),
+        ("Radiografias", "Raio-X periapical ou bite-wing", "R$15 a R$34"),
+        ("Radiografias", "Raio-X Panorâmica", "R$57 a R$115"),
+        ("Procedimentos Básicos", "Limpeza simples (Profilaxia)", "R$100 a R$400"),
+        ("Restaurações (Obturações)", "Restauração de Resina (1 face)", "a partir de R$100"),
+        ("Restaurações (Obturações)", "Restauração de Resina (2 faces)", "a partir de R$192"),
+        ("Endodontia (Canal)", "Tratamento de Canal (Incisivo/Canino)", "R$517 a R$630"),
+        ("Endodontia (Canal)", "Tratamento de Canal (Pré-molar/Molar)", "R$432 a R$876"),
+        ("Exodontia (Cirúrgicos)", "Extração simples de dente permanente", "R$150 a R$172"),
+        ("Exodontia (Cirúrgicos)", "Extração de dente de leite", "R$96 a R$102"),
+        ("Exodontia (Cirúrgicos)", "Extração de dente incluso/impactado", "R$364 a R$390"),
+        ("Próteses e Coroas", "Coroa provisória", "R$150 a R$268"),
+        ("Próteses e Coroas", "Coroa metalo-cerâmica", "R$576 a R$600"),
+        ("Próteses e Coroas", "Coroa cerâmica pura", "R$576 a R$605"),
+        ("Clareamento Dentário", "Clareamento caseiro (por arcada)", "R$316 a R$330"),
+        ("Clareamento Dentário", "Clareamento em consultório (por arcada)", "R$316 a R$330"),
+        ("Implantes / Cirurgias", "Implante dentário unitário", "a partir de R$576"),
+        ("Implantes / Cirurgias", "Enxertos ósseos", "R$200 a R$800"),
+        ("Implantes / Cirurgias", "Levantamento de seio maxilar", "R$576 a R$800"),
     ]
-    for p in procedimentos_data:
-        nums = re.findall(r"\d+", p["valor"])
-        valor_base = float(nums[0]) if nums else None
-        db.add(
-            Procedimento(
-                nome=p["nome"],
-                categoria=p["categoria"],
-                valor_descritivo=p["valor"],
-                valor_base=valor_base,
-            )
-        )
+    for cat, nome, val in lista:
+        base = float(re.findall(r"\d+", val)[0]) if re.findall(r"\d+", val) else None
+        db.add(Procedimento(nome=nome, categoria=cat, valor_descritivo=val, valor_base=base))
     db.commit()
 
-# ─────────────────────────────── 4. HELPERS ─────────────────────────────── #
-def limpar_rotulos(texto: str) -> str:
-    for padrao in (
-        r"^\s*A[cç]ão:\s*",
-        r"^\s*Resumo:\s*",
-        r"^\s*Action:\s*",
-        r"^\s*Summary:\s*",
-    ):
-        texto = re.sub(padrao, "", texto, flags=re.I | re.M)
-    return texto.strip()
+# ─────────────────────────────── 4. HELPERS ──────────────────────────────── #
+def limpar_rotulos(txt: str) -> str:
+    for p in (r"^\s*A[cç]ão:\s*", r"^\s*Resumo:\s*", r"^\s*Action:\s*", r"^\s*Summary:\s*"):
+        txt = re.sub(p, "", txt, flags=re.I | re.M)
+    return txt.strip()
 
-def parse_data_nascimento(s: str) -> Optional[datetime]:
-    s = s.strip()
-    m = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$", s)
+def parse_data_nasc(s: str) -> Optional[datetime]:
+    m = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$", s.strip())
     if m:
         d, mth, y = map(int, m.groups())
-        if y < 100:
-            y += 1900 if y > 25 else 2000
+        y += 1900 if y < 100 and y > 25 else (2000 if y < 100 else 0)
         if 1 <= mth <= 12 and 1 <= d <= calendar.monthrange(y, mth)[1]:
             return datetime(y, mth, d)
     return parse_date(s, languages=["pt"], settings={"DATE_ORDER": "DMY"})
 
-NAME_RE = re.compile(r"^[A-Za-zÀ-ÖØ-öø-ÿ'´` ]{6,}$")
+REL_MAP = {
+    "hoje": 0, "amanhã": 1, "amanha":1, "depois de amanhã":2, "depois de amanha":2,
+}
+def normalizar_data_relativa(texto: str) -> str:
+    txt = texto.lower().strip()
+    if txt in REL_MAP:
+        target = now_naive().date() + timedelta(days=REL_MAP[txt])
+        return target.strftime("%d/%m/%Y")
+    m = re.match(r"^próxima\s+(\w+)$", txt) or re.match(r"^proxima\s+(\w+)$", txt)
+    if m:
+        dias = ["segunda", "terça", "terca", "quarta", "quinta", "sexta", "sábado", "sabado", "domingo"]
+        dia_idx = dias.index(m.group(1)) if m.group(1) in dias else -1
+        if dia_idx >= 0:
+            hoje_idx = now_naive().weekday()
+            delta = (dia_idx - hoje_idx + 7) % 7 or 7
+            target = now_naive().date() + timedelta(days=delta)
+            return target.strftime("%d/%m/%Y")
+    return texto  # se não casar, devolve original
 
-def tentar_salvar_nome(db: Session, paciente: Paciente, texto: str) -> None:
-    if paciente.nome_completo:
-        return
-    if NAME_RE.match(texto) and len(texto.split()) >= 2 and not re.search(r"\d", texto):
-        paciente.nome_completo = texto.strip()
-        db.commit()
+NAME_RE = re.compile(r"^[A-Za-zÀ-ÖØ-öø-ÿ'´` ]{6,}$")
+def tentar_salvar_nome(db: Session, paciente: Paciente, msg: str) -> None:
+    if paciente.nome_completo: return
+    if NAME_RE.match(msg) and len(msg.split()) >= 2 and not re.search(r"\d", msg):
+        paciente.nome_completo = msg.strip(); db.commit()
 
 def buscar_ou_criar_paciente(db: Session, tel: str) -> Paciente:
-    paciente = db.query(Paciente).filter_by(telefone=tel).first()
-    if not paciente:
-        paciente = Paciente(telefone=tel)
-        db.add(paciente)
-        db.commit()
-        db.refresh(paciente)
-    return paciente
+    p = db.query(Paciente).filter_by(telefone=tel).first()
+    if not p: p = Paciente(telefone=tel); db.add(p); db.commit(); db.refresh(p)
+    return p
 
 def listar_todos_os_procedimentos(db: Session) -> str:
-    procedimentos = db.query(Procedimento).order_by(Procedimento.categoria, Procedimento.nome).all()
-    if not procedimentos:
-        return "Não consegui encontrar a lista de procedimentos no momento."
-    categorias: dict[str, list[str]] = defaultdict(list)
-    for p in procedimentos:
-        categorias[p.categoria].append(p.nome)
-    resposta = "Oferecemos uma ampla gama de serviços! Nossos procedimentos incluem:\n\n"
-    for cat, nomes in categorias.items():
-        resposta += f"*{cat}*\n" + "\n".join(f"- {n}" for n in nomes) + "\n\n"
-    return resposta.strip()
+    procs = db.query(Procedimento).order_by(Procedimento.categoria, Procedimento.nome).all()
+    if not procs: return "Não consegui encontrar a lista de procedimentos."
+    cats: dict[str, list[str]] = defaultdict(list)
+    for p in procs: cats[p.categoria].append(p.nome)
+    out = "Oferecemos:\n\n"
+    for c, nomes in cats.items(): out += f"*{c}*\n" + "\n".join(f"- {n}" for n in nomes) + "\n\n"
+    return out.strip()
 
-# ───────────— CORREÇÃO 14.0.4: busca por preço com OR e ranking ─────────── #
-def consultar_precos_procedimentos(db: Session, termo_busca: str) -> str:
-    termo_norm = re.sub(r"[-.,]", " ", termo_busca.lower())
+def consultar_precos_procedimentos(db: Session, termo: str) -> str:
+    termo_norm = re.sub(r"[-.,]", " ", termo.lower())
     palavras = [p for p in termo_norm.split() if p]
-    if not palavras:
-        return "Não entendi o procedimento que você procura."
+    if not palavras: return "Não entendi o procedimento."
     filtros = [Procedimento.nome.ilike(f"%{p}%") for p in palavras]
-    resultados = db.query(Procedimento).filter(or_(*filtros)).all()
-    if not resultados:
-        return f"Não encontrei informações de valores para '{termo_busca}'."
-    def score(proc: Procedimento) -> int:
-        nome_lower = proc.nome.lower()
-        return sum(1 for p in palavras if p in nome_lower)
-    resultados.sort(key=score, reverse=True)
+    res = db.query(Procedimento).filter(or_(*filtros)).all()
+    if not res: return f"Não encontrei valores para '{termo}'."
+    def score(proc: Procedimento) -> int: return sum(p in proc.nome.lower() for p in palavras)
+    res.sort(key=score, reverse=True)
     linhas = []
-    for r in resultados[:3]:
-        if r.valor_base:
-            linhas.append(
-                f"O valor para {r.nome} é a partir de R$ {int(r.valor_base):,}.00".replace(",", ".")
-            )
-        else:
-            linhas.append(f"Para {r.nome}, o valor é {r.valor_descritivo}")
+    for r in res[:3]:
+        linhas.append(f"O valor para {r.nome} é "
+                      f"{'a partir de R$ ' + str(int(r.valor_base)) + ',00' if r.valor_base else r.valor_descritivo}")
     return "\n".join(linhas)
 
 def consultar_horarios_disponiveis(db: Session, dia: str) -> str:
-    dia_obj = parse_date(dia, languages=["pt"], settings={"TIMEZONE": "America/Sao_Paulo"})
-    if not dia_obj:
-        return "Não entendi a data."
-    dia_naive = to_naive_sp(dia_obj)
-    inicio = dia_naive.replace(hour=BUSINESS_START.hour, minute=0, second=0, microsecond=0)
-    fim = dia_naive.replace(hour=BUSINESS_END.hour, minute=0, second=0, microsecond=0)
-    ags = (
-        db.query(Agendamento)
-        .filter(Agendamento.data_hora.between(inicio, fim), Agendamento.status == "confirmado")
-        .all()
-    )
+    dia = normalizar_data_relativa(dia)
+    dia_obj = parse_date(dia, languages=["pt"], settings={"TIMEZONE":"America/Sao_Paulo"})
+    if not dia_obj: return "Não entendi a data."
+    d = to_naive_sp(dia_obj); ini = d.replace(hour=BUSINESS_START.hour, minute=0, second=0, microsecond=0)
+    fim = d.replace(hour=BUSINESS_END.hour, minute=0, second=0, microsecond=0)
+    ags = db.query(Agendamento).filter(Agendamento.data_hora.between(ini, fim),
+                                       Agendamento.status=="confirmado").all()
     ocupados = {a.data_hora.replace(second=0, microsecond=0) for a in ags}
-    slots = []
-    cur = inicio
-    delta = timedelta(minutes=SLOT_MINUTES)
+    slots, cur = [], ini
+    delta = timedelta(minutes=SLOT_MIN)
     while cur <= fim - delta:
-        if cur not in ocupados and cur > get_now_naive():
-            slots.append(cur)
+        if cur not in ocupados and cur > now_naive(): slots.append(cur)
         cur += delta
-    if not slots:
-        return "Infelizmente não há horários disponíveis nesse dia."
-    return "Horários livres: " + ", ".join(s.strftime("%H:%M") for s in slots) + ". Qual prefere?"
+    if not slots: return "Sem horários livres nesse dia."
+    return "Horários livres: " + ", ".join(s.strftime("%H:%M") for s in slots) + "."
 
-# ───────────── 5. FUNÇÃO CENTRAL DE AGENDAMENTO (sem alterações) ─────────── #
+# NOVO: permitir a IA listar agendamentos confirmados
+def listar_agendamentos_ativos(db: Session, telefone_paciente: str) -> str:
+    p = buscar_ou_criar_paciente(db, telefone_paciente)
+    ags = db.query(Agendamento).filter(Agendamento.paciente_id==p.id,
+                                       Agendamento.status=="confirmado",
+                                       Agendamento.data_hora>=now_naive()).all()
+    if not ags: return "Você não possui agendamentos ativos."
+    linhas=[]
+    for a in ags:
+        linhas.append(f"ID {a.id}: {a.procedimento} em {a.data_hora.strftime('%d/%m/%Y às %H:%M')}")
+    return "Seus agendamentos:\n"+"\n".join(linhas)
+
+# ──────────── 5. FUNÇÃO CENTRAL DE AGENDAMENTO (mesma lógica + filtro) ───── #
 def processar_solicitacao_agendamento(
-    db: Session,
-    telefone_paciente: str,
-    intencao: str,
-    procedimento: Optional[str] = None,
-    data_hora_texto: Optional[str] = None,
-    confirmacao_usuario: bool = False,
-    dados_paciente: Optional[Dict[str, str]] = None,
+    db: Session, telefone_paciente: str, intencao: str,
+    procedimento: Optional[str]=None, data_hora_texto: Optional[str]=None,
+    confirmacao_usuario: bool=False, dados_paciente: Optional[Dict[str,str]]=None,
 ) -> str:
-    paciente = buscar_ou_criar_paciente(db, tel=telefone_paciente)
+    paciente = buscar_ou_criar_paciente(db, telefone_paciente)
     if dados_paciente:
-        if nome := dados_paciente.get("nome_completo"):
-            paciente.nome_completo = nome
-        if email := dados_paciente.get("email"):
-            paciente.email = email
-        if endereco := dados_paciente.get("endereco"):
-            paciente.endereco = endereco
-        if dn_str := dados_paciente.get("data_nascimento"):
-            dn_obj = parse_data_nascimento(dn_str)
-            if dn_obj:
-                paciente.data_nascimento = dn_obj.date()
-            else:
-                return "Formato de data inválido. Use DD/MM/AAAA."
+        if (nome:=dados_paciente.get("nome_completo")): paciente.nome_completo = nome
+        if (email:=dados_paciente.get("email")): paciente.email = email
+        if (end:=dados_paciente.get("endereco")): paciente.endereco = end
+        if (dn:=dados_paciente.get("data_nascimento")):
+            dn_obj = parse_data_nasc(dn)
+            if dn_obj: paciente.data_nascimento = dn_obj.date()
+            else: return "Formato de data inválido. Use DD/MM/AAAA."
         db.commit()
-    faltando = [
-        campo
-        for campo, val in [
-            ("nome completo", paciente.nome_completo),
-            ("data de nascimento", paciente.data_nascimento),
-            ("e-mail", paciente.email),
-            ("endereço", paciente.endereco),
-        ]
-        if not val
-    ]
-    if faltando:
-        return f"Ação: Continue o cadastro. Solicite {faltando[0]}."
-    ags_ativos = (
-        db.query(Agendamento)
-        .filter(
-            Agendamento.paciente_id == paciente.id,
-            Agendamento.status == "confirmado",
-            Agendamento.data_hora >= get_now_naive(),
-        )
-        .order_by(Agendamento.data_hora)
-        .all()
-    )
-    if intencao == "cancelar":
-        if not ags_ativos:
-            return "Você não possui agendamentos para cancelar."
-        if len(ags_ativos) > 1 and not confirmacao_usuario:
-            ids = ", ".join(str(a.id) for a in ags_ativos)
-            return f"Ação: Liste e peça confirmação para cancelar. IDs: {ids}"
-        for a in ags_ativos:
-            a.status = "cancelado"
-        db.commit()
-        return "Sucesso! Agendamento cancelado."
-    if intencao in {"agendar", "reagendar"}:
+
+    pendentes = [c for c,v in [
+        ("nome completo", paciente.nome_completo),
+        ("data de nascimento", paciente.data_nascimento),
+        ("e-mail", paciente.email),
+        ("endereço", paciente.endereco),
+    ] if not v]
+    if pendentes:
+        return f"Ação: Solicite {pendentes[0]}."
+
+    ags = db.query(Agendamento).filter(
+        Agendamento.paciente_id==paciente.id,
+        Agendamento.status=="confirmado",
+        Agendamento.data_hora>=now_naive()
+    ).order_by(Agendamento.data_hora).all()
+
+    if intencao=="cancelar":
+        if not ags: return "Você não possui agendamentos para cancelar."
+        if len(ags)>1 and not confirmacao_usuario:
+            ids=", ".join(str(a.id) for a in ags)
+            return f"Ação: Pergunte quais IDs cancelar. IDs: {ids}"
+        for a in ags: a.status="cancelado"
+        db.commit(); return "Agendamento cancelado com sucesso."
+
+    if intencao in {"agendar","reagendar"}:
         if not procedimento:
-            return "Ação: Pergunte qual procedimento deseja agendar."
+            return "Ação: Pergunte qual procedimento deseja."
         proc_obj = db.query(Procedimento).filter(Procedimento.nome.ilike(f"%{procedimento}%")).first()
         proc_real = proc_obj.nome if proc_obj else procedimento
         if not data_hora_texto:
-            return f"Ação: Pergunte dia e horário para '{proc_real}'."
-        dt_obj = parse_date(
-            data_hora_texto, languages=["pt"], settings={"PREFER_DATES_FROM": "future", "TIMEZONE": "America/Sao_Paulo"}
-        )
-        if not dt_obj:
-            return "Não entendi data/hora. Peça novamente."
+            return f"Ação: Pergunte data e horário para '{proc_real}'."
+        if re.search(r"[A-Za-z]", data_hora_texto):
+            return "Por favor informe apenas a data e o horário (ex.: 19/06 às 10:00)."
+        data_hora_texto = normalizar_data_relativa(data_hora_texto)
+        dt_obj = parse_date(data_hora_texto, languages=["pt"],
+                            settings={"PREFER_DATES_FROM":"future","TIMEZONE":"America/Sao_Paulo"})
+        if not dt_obj: return "Não entendi data/hora. Tente no formato DD/MM às HH:MM."
         dt_naive = to_naive_sp(dt_obj)
-        if not (BUSINESS_START <= dt_naive.time() <= BUSINESS_END):
+        if not (BUSINESS_START<=dt_naive.time()<=BUSINESS_END):
             return "Atendemos apenas das 09:00 às 17:00."
-        if db.query(Agendamento).filter_by(data_hora=dt_naive, status="confirmado").first():
+        if db.query(Agendamento).filter_by(data_hora=dt_naive,status="confirmado").first():
             return "Horário ocupado. Use `consultar_horarios_disponiveis`."
         if not confirmacao_usuario:
-            return (
-                "Ação: Peça confirmação final. Resumo: Agendamento de "
-                f"{proc_real} para {dt_naive.strftime('%d/%m/%Y às %H:%M')} com a Dra. "
-                "Valéria Cristina Di Donato. Está correto?"
-            )
-        if intencao == "agendar":
-            db.add(Agendamento(paciente_id=paciente.id, data_hora=dt_naive, procedimento=proc_real))
+            return ("Ação: Peça confirmação final. Resumo: Agendamento de "
+                    f"{proc_real} para {dt_naive.strftime('%d/%m/%Y às %H:%M')}. Está correto?")
+        if intencao=="agendar":
+            db.add(Agendamento(paciente_id=paciente.id,data_hora=dt_naive,procedimento=proc_real))
         else:
-            if not ags_ativos:
-                return "Não há agendamento para reagendar."
-            ags_ativos[0].data_hora = dt_naive
+            if not ags: return "Nenhum agendamento para reagendar."
+            ags[0].data_hora = dt_naive
         db.commit()
-        return f"Sucesso! Agendamento para {dt_naive.strftime('%d/%m/%Y às %H:%M')}."
-    return "Não entendi a solicitação. Pode reformular?"
+        return f"Sucesso! Agendado para {dt_naive.strftime('%d/%m/%Y às %H:%M')}."
 
-# ─────────────────────── 6. FUNÇÕES DISPONÍVEIS ─────────────────────────── #
-available_functions: Dict[str, Any] = {
+    return "Não entendi a solicitação."
+
+# ─────────────── 6. FUNÇÕES EXPONÍVEIS / TOOLS PARA A IA ─────────────────── #
+available_functions: Dict[str,Any] = {
     "processar_solicitacao_agendamento": processar_solicitacao_agendamento,
     "listar_todos_os_procedimentos": listar_todos_os_procedimentos,
     "consultar_precos_procedimentos": consultar_precos_procedimentos,
     "consultar_horarios_disponiveis": consultar_horarios_disponiveis,
+    "listar_agendamentos_ativos": listar_agendamentos_ativos,   # novo
 }
-
-tools: List[Dict[str, Any]] = [
+tools: List[Dict[str,Any]] = [
     {
-        "type": "function",
-        "function": {
-            "name": "processar_solicitacao_agendamento",
-            "description": "Ferramenta para agendar, reagendar, cancelar e coletar dados.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "intencao": {
-                        "type": "string",
-                        "enum": ["agendar", "reagendar", "cancelar", "coletar_dados"],
-                    },
-                    "procedimento": {"type": "string"},
-                    "data_hora_texto": {"type": "string"},
-                    "confirmacao_usuario": {"type": "boolean"},
-                    "dados_paciente": {
-                        "type": "object",
-                        "properties": {
-                            "nome_completo": {"type": "string"},
-                            "email": {"type": "string"},
-                            "data_nascimento": {"type": "string"},
-                            "endereco": {"type": "string"},
+        "type":"function",
+        "function":{
+            "name":"processar_solicitacao_agendamento",
+            "description":"Fluxo completo de agenda e cadastro.",
+            "parameters":{
+                "type":"object",
+                "properties":{
+                    "intencao":{"type":"string","enum":["agendar","reagendar","cancelar","coletar_dados"]},
+                    "procedimento":{"type":"string"},
+                    "data_hora_texto":{"type":"string"},
+                    "confirmacao_usuario":{"type":"boolean"},
+                    "dados_paciente":{
+                        "type":"object",
+                        "properties":{
+                            "nome_completo":{"type":"string"},
+                            "email":{"type":"string"},
+                            "data_nascimento":{"type":"string"},
+                            "endereco":{"type":"string"},
                         },
                     },
                 },
-                "required": ["intencao"],
+                "required":["intencao"],
             },
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "listar_todos_os_procedimentos",
-            "description": "Lista todos os serviços oferecidos.",
-            "parameters": {"type": "object", "properties": {}},
-        },
+        "type":"function",
+        "function":{"name":"listar_todos_os_procedimentos","description":"Lista serviços","parameters":{"type":"object","properties":{}}},
     },
     {
-        "type": "function",
-        "function": {
-            "name": "consultar_precos_procedimentos",
-            "description": "Informa preço/valor de um procedimento.",
-            "parameters": {
-                "type": "object",
-                "properties": {"termo_busca": {"type": "string"}},
-                "required": ["termo_busca"],
-            },
-        },
+        "type":"function",
+        "function":{"name":"consultar_precos_procedimentos","description":"Retorna preço","parameters":{
+            "type":"object","properties":{"termo_busca":{"type":"string"}},"required":["termo_busca"]}},
     },
     {
-        "type": "function",
-        "function": {
-            "name": "consultar_horarios_disponiveis",
-            "description": "Exibe horários livres para uma data.",
-            "parameters": {
-                "type": "object",
-                "properties": {"dia": {"type": "string"}},
-                "required": ["dia"],
-            },
-        },
+        "type":"function",
+        "function":{"name":"consultar_horarios_disponiveis","description":"Horários livres","parameters":{
+            "type":"object","properties":{"dia":{"type":"string"}},"required":["dia"]}},
+    },
+    {
+        "type":"function",
+        "function":{"name":"listar_agendamentos_ativos","description":"Mostra agendamentos confirmados","parameters":{
+            "type":"object","properties":{}}},
     },
 ]
 
-# ────────────────────────────── 7. FASTAPI ─────────────────────────────── #
-app = FastAPI(title="OdontoBot AI", version="14.0.4")
-
+# ─────────────────────────────── 7. FASTAPI ─────────────────────────────── #
+app = FastAPI(title="OdontoBot AI", version="14.0.5")
 @app.on_event("startup")
-async def on_startup() -> None:
-    await asyncio.to_thread(criar_tabelas)
-    with SessionLocal() as db:
-        popular_procedimentos_iniciais(db)
-    print("Tabelas criadas e procedimentos prontos.", flush=True)
+async def startup() -> None:
+    await asyncio.to_thread(create_tables)
+    with SessionLocal() as db: seed_procedimentos(db)
+    print("✔️ Banco pronto")
 
 @app.get("/")
-def health_get() -> dict[str, str]:
-    return {"status": "ok"}
-
+def health() -> dict[str,str]: return {"status":"ok"}
 @app.head("/")
-def health_head() -> Response:
-    return Response(status_code=200)
+def health_h() -> Response: return Response(status_code=200)
 
 # ───────────────────────────── 8. WEBHOOK ───────────────────────────────── #
-class ZapiText(BaseModel):
-    message: Optional[str] = None
-
-class ZapiAudio(BaseModel):
-    audioUrl: Optional[str] = None
-
+class ZapiText(BaseModel):  message: Optional[str]=None
+class ZapiAudio(BaseModel): audioUrl: Optional[str]=None
 class ZapiWebhookPayload(BaseModel):
-    phone: str
-    text: Optional[ZapiText] = None
-    audio: Optional[ZapiAudio] = None
+    phone: str; text: Optional[ZapiText]=None; audio: Optional[ZapiAudio]=None
 
-async def enviar_resposta_whatsapp(telefone: str, mensagem: str) -> None:
-    url = f"{ZAPI_API_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
-    payload = {"phone": telefone, "message": mensagem}
-    headers = {"Content-Type": "application/json", "Client-Token": ZAPI_CLIENT_TOKEN}
-    async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            resp = await client.post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-        except Exception as exc:  # noqa: BLE001
-            print("Falha ao enviar via Z-API:", exc, flush=True)
+async def send_whatsapp(phone:str,msg:str)->None:
+    url=f"{ZAPI_API_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
+    payload={"phone":phone,"message":msg}
+    async with httpx.AsyncClient(timeout=30) as c:
+        try: await c.post(url,json=payload,headers={"Content-Type":"application/json","Client-Token":ZAPI_CLIENT_TOKEN})
+        except Exception as e: print("Erro Z-API:",e)
 
 @app.post("/whatsapp/webhook")
-async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
-    raw = await request.json()
-    print(">>> PAYLOAD:", raw, flush=True)
-    try:
-        payload = ZapiWebhookPayload(**raw)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(422, "Formato inválido") from exc
-    tel = payload.phone
-    user_msg: Optional[str] = None
-    if payload.audio and payload.audio.audioUrl:
-        texto = await transcrever_audio_whisper(payload.audio.audioUrl)
-        if texto:
-            user_msg = texto
-        else:
-            await enviar_resposta_whatsapp(tel, "Desculpe, não entendi seu áudio.")
-            return {"status": "erro_transcricao"}
-    elif payload.text and payload.text.message:
-        user_msg = payload.text.message
+async def webhook(req: Request, db: Session = Depends(get_db)) -> Dict[str,Any]:
+    raw=await req.json();  print("payload",raw)
+    try: pay=ZapiWebhookPayload(**raw)
+    except Exception: raise HTTPException(422,"payload inválido")
+    tel, user_msg = pay.phone, None
+    if pay.audio and pay.audio.audioUrl:
+        user_msg=await transcrever_audio(pay.audio.audioUrl) or ""
+    elif pay.text and pay.text.message: user_msg=pay.text.message
     if not user_msg:
-        await enviar_resposta_whatsapp(
-            tel, "Olá! Sou Sofia, assistente da DI DONATO ODONTO. Como posso ajudar?"
-        )
-        return {"status": "saudacao"}
-    paciente = buscar_ou_criar_paciente(db, tel)
-    tentar_salvar_nome(db, paciente, user_msg)
-    db.add(HistoricoConversa(paciente_id=paciente.id, role="user", content=user_msg))
-    db.commit()
-    historico = (
-        db.query(HistoricoConversa)
-        .filter(
-            HistoricoConversa.paciente_id == paciente.id,
-            HistoricoConversa.timestamp >= get_now() - timedelta(hours=24),
-            HistoricoConversa.role != "system",
-        )
-        .order_by(HistoricoConversa.timestamp)
-        .all()
-    )
-    system_prompt = (
-        "Você é Sofia, assistente virtual da clínica DI DONATO ODONTO (Dra. Valéria Cristina). "
-        "Responda em português BR, nunca invente informações nem forneça diagnósticos. "
-        "Para horários, use a função `consultar_horarios_disponiveis`. "
-        "Quando coletar nome completo, mantenha exatamente como o usuário digitou."
-    )
-    msgs: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
-    msgs.extend({"role": m.role, "content": m.content} for m in historico[-10:])
-    msgs.append({"role": "user", "content": user_msg})
+        await send_whatsapp(tel,"Olá! Sou Sofia da DI DONATO ODONTO. Como posso ajudar?"); return {"status":"saudação"}
+    paciente=buscar_ou_criar_paciente(db,tel); tentar_salvar_nome(db,paciente,user_msg)
+    db.add(HistoricoConversa(paciente_id=paciente.id,role="user",content=user_msg)); db.commit()
+    hist=db.query(HistoricoConversa).filter(
+        HistoricoConversa.paciente_id==paciente.id, HistoricoConversa.timestamp>=now_tz()-timedelta(hours=24),
+        HistoricoConversa.role!="system").order_by(HistoricoConversa.timestamp).all()
+    sys_prompt=("Você é Sofia, assistente virtual da clínica DI DONATO ODONTO (Dra. Valéria Cristina). "
+                "Responda em português BR e use as ferramentas fornecidas. "
+                "Converta expressões como 'amanhã' ou 'próxima sexta' em datas absolutas "
+                "e confirme DD/MM/AAAA + horário antes de criar um agendamento.")
+    msgs=[{"role":"system","content":sys_prompt}]+[
+        {"role":m.role,"content":m.content} for m in hist[-10:]
+    ]+[{"role":"user","content":user_msg}]
     try:
-        model = "google/gemini-2.5-flash-preview-05-20"
-        resp = openrouter_chat_completion(
-            model=model,
-            messages=msgs,
-            tools=tools,
-            tool_choice="auto",
-            temperature=0.2,
-            top_p=0.8,
-            max_tokens=1024,
-        )
-        ai_msg = resp.choices[0].message  # type: ignore[index]
-        while getattr(ai_msg, "tool_calls", None):
-            msgs_tool = msgs + [ai_msg]
+        resp=chat_completion(model="google/gemini-2.5-flash-preview-05-20",
+                             messages=msgs,tools=tools,tool_choice="auto",
+                             temperature=0.2,top_p=0.8,max_tokens=1024)
+        ai_msg=resp.choices[0].message  # type: ignore[index]
+        while getattr(ai_msg,"tool_calls",None):
+            msgs2=msgs+[ai_msg]
             for call in ai_msg.tool_calls:  # type: ignore[attr-defined]
-                fname = call.function.name
-                fargs = json.loads(call.function.arguments)
-                fn = available_functions.get(fname)
-                if not fn:
-                    raise HTTPException(500, f"Função desconhecida: {fname}")
-                kwargs: Dict[str, Any] = {"db": db}
-                if "telefone_paciente" in fn.__code__.co_varnames:  # type: ignore[attr-defined]
-                    kwargs["telefone_paciente"] = tel
-                result = fn(**kwargs, **fargs)
-                msgs_tool.append(
-                    {"tool_call_id": call.id, "role": "tool", "name": fname, "content": result}
-                )
-            resp = openrouter_chat_completion(
-                model=model,
-                messages=msgs_tool,
-                temperature=0.2,
-                top_p=0.8,
-                max_tokens=1024,
-            )
-            ai_msg = resp.choices[0].message  # type: ignore[index]
-        final = limpar_rotulos(ai_msg.content or "")
-    except Exception as exc:  # noqa: BLE001
-        print("Erro IA:", exc, flush=True)
-        final = "Desculpe, houve um problema técnico. Tente de novo."
-    db.add(HistoricoConversa(paciente_id=paciente.id, role="assistant", content=final))
-    db.commit()
-    await enviar_resposta_whatsapp(tel, final)
-    return {"status": "ok", "resposta": final}
+                fn=available_functions[call.function.name]
+                args=json.loads(call.function.arguments)
+                kwargs={"db":db}
+                if "telefone_paciente" in fn.__code__.co_varnames: kwargs["telefone_paciente"]=tel
+                result=fn(**kwargs,**args)
+                msgs2.append({"tool_call_id":call.id,"role":"tool","name":call.function.name,"content":result})
+            resp=chat_completion(model="google/gemini-2.5-flash-preview-05-20",
+                                 messages=msgs2,temperature=0.2,top_p=0.8,max_tokens=1024)
+            ai_msg=resp.choices[0].message  # type: ignore[index]
+        final=limpar_rotulos(ai_msg.content or "")
+    except Exception as e:
+        print("Erro IA:",e); final="Desculpe, houve um problema técnico. Tente novamente."
+    db.add(HistoricoConversa(paciente_id=paciente.id,role="assistant",content=final)); db.commit()
+    await send_whatsapp(tel,final); return {"status":"ok","resposta":final}
