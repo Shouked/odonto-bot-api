@@ -1,5 +1,5 @@
 """
-API principal do OdontoBot AI. Versão Final de Produção.
+API principal do OdontoBot AI. Versão Final para Produção.
 """
 
 import os, json, asyncio, re
@@ -33,10 +33,11 @@ try:
         except Exception as e: print(f"Erro ao transcrever áudio: {e}", flush=True); return None
 except ImportError as exc: raise RuntimeError("Pacote 'openai' não instalado.") from exc
 
-# ───────────────── 3. BANCO DE DADOS ───────────────────────── #
+# ───────────────── 3. BANCO DE DADOS (COM PACIENTE ATUALIZADO) ── #
 Base = declarative_base()
 class Paciente(Base):
-    __tablename__ = "pacientes"; id = Column(Integer, primary_key=True); nome_completo = Column(String, nullable=True); telefone = Column(String, unique=True, nullable=False); endereco = Column(String, nullable=True); email = Column(String, nullable=True); data_nascimento = Column(Date, nullable=True)
+    __tablename__ = "pacientes"
+    id = Column(Integer, primary_key=True); nome_completo = Column(String, nullable=True); telefone = Column(String, unique=True, nullable=False); endereco = Column(String, nullable=True); email = Column(String, nullable=True); data_nascimento = Column(Date, nullable=True)
     agendamentos = relationship("Agendamento", back_populates="paciente", cascade="all, delete-orphan"); historico = relationship("HistoricoConversa", back_populates="paciente", cascade="all, delete-orphan")
 class Agendamento(Base): __tablename__ = "agendamentos"; id, paciente_id = Column(Integer, primary_key=True), Column(Integer, ForeignKey("pacientes.id"), nullable=False); data_hora, procedimento, status = Column(DateTime, nullable=False), Column(String, nullable=False), Column(String, default="confirmado"); paciente = relationship("Paciente", back_populates="agendamentos")
 class HistoricoConversa(Base): __tablename__ = "historico_conversas"; id, paciente_id = Column(Integer, primary_key=True), Column(Integer, ForeignKey("pacientes.id"), nullable=False); role, content, timestamp = Column(String, nullable=False), Column(Text, nullable=False), Column(DateTime, default=datetime.utcnow); paciente = relationship("Paciente", back_populates="historico")
@@ -56,32 +57,24 @@ def buscar_ou_criar_paciente(db: Session, tel: str) -> Paciente:
     paciente = db.query(Paciente).filter_by(telefone=tel).first()
     if not paciente: paciente = Paciente(telefone=tel); db.add(paciente); db.commit(); db.refresh(paciente)
     return paciente
-def obter_proxima_etapa(db: Session, telefone_paciente: str) -> str:
+# [NOVO] Ferramenta que substitui o fluxo rígido anterior
+def verificar_ou_coletar_dados_paciente(db: Session, telefone_paciente: str, nome_completo: Optional[str] = None, email: Optional[str] = None, data_nascimento: Optional[str] = None, endereco: Optional[str] = None) -> str:
     paciente = buscar_ou_criar_paciente(db, tel=telefone_paciente)
-    if not paciente.nome_completo: return "Ação: Paciente novo ou sem nome. Apresente-se cordialmente, diga que precisa de alguns dados para o cadastro e peça o NOME COMPLETO."
-    if not paciente.data_nascimento: return f"Ação: Agradeça pelo nome ({paciente.nome_completo}) e peça a DATA DE NASCIMENTO no formato AAAA-MM-DD."
-    if not paciente.email: return "Ação: Agradeça pela data de nascimento e peça o E-MAIL do paciente."
-    if not paciente.endereco: return "Ação: Agradeça pelo email e peça o ENDEREÇO COMPLETO do paciente."
-    return f"Ação: Cadastro completo para {paciente.nome_completo}. Pergunte em que pode ajudar (agendar, consultar preços, etc.)."
-def atualizar_dados_paciente(db: Session, telefone_paciente: str, nome_completo: Optional[str] = None, endereco: Optional[str] = None, email: Optional[str] = None, data_nascimento: Optional[str] = None) -> str:
-    paciente = buscar_ou_criar_paciente(db, tel=telefone_paciente)
-    campos_atualizados = []
-    if nome_completo and not paciente.nome_completo: paciente.nome_completo = nome_completo; campos_atualizados.append("nome")
-    if endereco and not paciente.endereco: paciente.endereco = endereco; campos_atualizados.append("endereço")
-    if email and not paciente.email: paciente.email = email; campos_atualizados.append("email")
+    if nome_completo and not paciente.nome_completo: paciente.nome_completo = nome_completo
+    if email and not paciente.email: paciente.email = email
+    if endereco and not paciente.endereco: paciente.endereco = endereco
     if data_nascimento and not paciente.data_nascimento:
-        try: paciente.data_nascimento = datetime.strptime(data_nascimento, "%Y-%m-%d").date(); campos_atualizados.append("data de nascimento")
+        try: paciente.data_nascimento = datetime.strptime(data_nascimento, "%Y-%m-%d").date()
         except ValueError: return "Formato de data de nascimento inválido. Peça novamente no formato AAAA-MM-DD."
     db.commit()
-    return f"Dados atualizados com sucesso: {', '.join(campos_atualizados)}." if campos_atualizados else "Nenhum dado novo foi fornecido para atualização."
-# [BLINDADO] Ferramenta de agendamento final, que remove a chance de erro de formatação da IA.
-def agendar_consulta_inteligente(db: Session, telefone_paciente: str, procedimento: str, dia: str, hora: str) -> str:
-    """Ação FINAL para agendar uma consulta, usada apenas após o usuário confirmar o resumo."""
-    try:
-        data_obj = datetime.strptime(dia, "%Y-%m-%d").date()
-        hora_obj = datetime.strptime(hora, "%H:%M").time()
-        dt = datetime.combine(data_obj, hora_obj)
-    except ValueError: return "Formato de data ou hora inválido. A IA deve fornecer o dia como AAAA-MM-DD e a hora como HH:MM."
+    dados_faltantes = [campo for campo, valor in [("nome completo", paciente.nome_completo), ("data de nascimento", paciente.data_nascimento), ("email", paciente.email), ("endereço", paciente.endereco)] if not valor]
+    if dados_faltantes:
+        return f"Cadastro iniciado. Próximo passo: peça o próximo dado faltante da lista: {', '.join(dados_faltantes)}."
+    return "Cadastro completo. Você já pode usar as ferramentas de agendamento, consulta de horários ou cancelamento."
+
+def agendar_consulta(db: Session, telefone_paciente: str, data_hora_agendamento: str, procedimento: str) -> str:
+    try: dt = datetime.strptime(data_hora_agendamento, "%Y-%m-%d %H:%M")
+    except ValueError: return "Formato de data/hora inválido. Use AAAA-MM-DD HH:MM."
     if dt < datetime.now(): return "Não é possível agendar no passado."
     if dt.weekday() >= 5: return "A clínica não funciona aos fins de semana."
     if not (9 <= dt.hour < 18): return "O horário de funcionamento é das 09:00 às 18:00."
@@ -103,15 +96,32 @@ def consultar_horarios_disponiveis(db: Session, telefone_paciente: str, dia: str
     if not horarios_disponiveis: return f"Não há mais horários disponíveis para o dia {data_consulta.strftime('%d/%m/%Y')}."
     horarios_formatados = [t.strftime('%H:%M') for t in horarios_disponiveis]
     return f"Os horários livres para o dia {data_consulta.strftime('%d/%m/%Y')} são: {', '.join(horarios_formatados)}."
-def consultar_e_cancelar_inteligente(db: Session, telefone_paciente: str, dica: Optional[str] = None) -> str:
+# [REINTRODUZIDO] Ferramenta de reagendamento inteligente
+def reagendar_consulta_inteligente(db: Session, telefone_paciente: str, novo_dia: str, nova_hora: str, id_antigo: Optional[int] = None) -> str:
     pac = buscar_ou_criar_paciente(db, tel=telefone_paciente)
     query = db.query(Agendamento).filter(Agendamento.paciente_id == pac.id, Agendamento.status == "confirmado", Agendamento.data_hora >= datetime.now())
-    if dica: query = query.filter(Agendamento.procedimento.ilike(f'%{dica}%'))
+    if id_antigo: query = query.filter(Agendamento.id == id_antigo)
     ags = query.all()
-    if not ags: return "Não encontrei um agendamento futuro para cancelar."
-    if len(ags) > 1: return "Encontrei mais de um agendamento. Qual deles você gostaria de cancelar? Informe o ID.\n" + consultar_meus_agendamentos(db, telefone_paciente)
-    ag_cancelar = ags[0]; ag_cancelar.status = "cancelado"; db.commit()
-    return f"Ok, cancelei seu agendamento de {ag_cancelar.procedimento} do dia {ag_cancelar.data_hora.strftime('%d/%m/%Y às %H:%M')}."
+    if not ags: return "Não encontrei o agendamento que você quer reagendar."
+    if len(ags) > 1: return "Encontrei mais de um agendamento. Qual deles você gostaria de reagendar? Informe o ID.\n" + consultar_meus_agendamentos(db, telefone_paciente)
+    ag_reagendar = ags[0]
+    try: nova_dt = datetime.combine(datetime.strptime(novo_dia, "%Y-%m-%d").date(), datetime.strptime(nova_hora, "%H:%M").time())
+    except ValueError: return "O formato da nova data ou hora é inválido. Use AAAA-MM-DD e HH:MM."
+    ag_reagendar.data_hora = nova_dt; db.commit()
+    return f"Pronto! Seu agendamento foi reagendado para {nova_dt.strftime('%d/%m/%Y às %H:%M')}."
+# [BLINDADO] Ferramenta de cancelamento que aceita múltiplos IDs
+def cancelar_agendamentos(db: Session, telefone_paciente: str, ids_para_cancelar: List[int]) -> str:
+    pac = buscar_ou_criar_paciente(db, tel=telefone_paciente)
+    if not ids_para_cancelar: return "Por favor, especifique os IDs dos agendamentos a serem cancelados."
+    agendamentos_cancelados = []
+    for ag_id in ids_para_cancelar:
+        ag = db.query(Agendamento).filter_by(id=ag_id, paciente_id=pac.id, status="confirmado").first()
+        if ag:
+            ag.status = "cancelado"
+            agendamentos_cancelados.append(f"ID {ag.id} ({ag.procedimento})")
+    db.commit()
+    if not agendamentos_cancelados: return "Não encontrei nenhum dos agendamentos com os IDs fornecidos."
+    return f"Ok, cancelei os seguintes agendamentos: {', '.join(agendamentos_cancelados)}."
 def listar_todos_os_procedimentos(db: Session, telefone_paciente: str) -> str:
     procedimentos = db.query(Procedimento).order_by(Procedimento.categoria, Procedimento.nome).all()
     if not procedimentos: return "Não consegui encontrar a lista de procedimentos no momento."
@@ -131,18 +141,18 @@ def consultar_precos_procedimentos(db: Session, telefone_paciente: str, termo_bu
         else: respostas.append(f"Para {r.nome}, o valor é {r.valor_descritivo}")
     return "\n".join(respostas)
 
-available_functions = {"obter_proxima_etapa": obter_proxima_etapa, "atualizar_dados_paciente": atualizar_dados_paciente, "agendar_consulta_inteligente": agendar_consulta_inteligente, "consultar_meus_agendamentos": consultar_meus_agendamentos, "consultar_e_cancelar_inteligente": consultar_e_cancelar_inteligente, "consultar_horarios_disponiveis": consultar_horarios_disponiveis, "listar_todos_os_procedimentos": listar_todos_os_procedimentos, "consultar_precos_procedimentos": consultar_precos_procedimentos}
-tools = [{"type": "function", "function": {"name": "obter_proxima_etapa", "description": "Verifica o status do cadastro do paciente para determinar a próxima ação.", "parameters": {"type": "object", "properties": {}}}},
-         {"type": "function", "function": {"name": "atualizar_dados_paciente", "description": "Atualiza os dados de um paciente.", "parameters": {"type": "object", "properties": {"nome_completo": {"type": "string"}, "endereco": {"type": "string"}, "email": {"type": "string"}, "data_nascimento": {"type": "string", "description": "Formato AAAA-MM-DD"}}}}},
-         {"type": "function", "function": {"name": "agendar_consulta_inteligente", "description": "Ação FINAL para agendar uma consulta, usada apenas após o usuário confirmar o resumo. Requer dia e hora separados.", "parameters": {"type": "object", "properties": {"procedimento": {"type": "string"}, "dia": {"type": "string", "description": "A data do agendamento no formato AAAA-MM-DD"}, "hora": {"type": "string", "description": "A hora do agendamento no formato HH:MM"}}, "required": ["procedimento", "dia", "hora"]}}},
+available_functions = {"verificar_ou_coletar_dados_paciente": verificar_ou_coletar_dados_paciente, "agendar_consulta": agendar_consulta, "consultar_meus_agendamentos": consultar_meus_agendamentos, "cancelar_agendamentos": cancelar_agendamentos, "reagendar_consulta_inteligente": reagendar_consulta_inteligente, "consultar_horarios_disponiveis": consultar_horarios_disponiveis, "listar_todos_os_procedimentos": listar_todos_os_procedimentos, "consultar_precos_procedimentos": consultar_precos_procedimentos}
+tools = [{"type": "function", "function": {"name": "verificar_ou_coletar_dados_paciente", "description": "Usada para verificar o cadastro de um paciente e coletar dados faltantes (nome, email, etc.).", "parameters": {"type": "object", "properties": {"nome_completo": {"type": "string"}, "endereco": {"type": "string"}, "email": {"type": "string"}, "data_nascimento": {"type": "string", "description": "Formato AAAA-MM-DD"}}}}},
+         {"type": "function", "function": {"name": "agendar_consulta", "description": "Ação FINAL para agendar uma consulta.", "parameters": {"type": "object", "properties": {"data_hora_agendamento": {"type": "string"}, "procedimento": {"type": "string"}}, "required": ["data_hora_agendamento", "procedimento"]}}},
+         {"type": "function", "function": {"name": "reagendar_consulta_inteligente", "description": "Reagenda uma consulta existente para um novo dia e hora.", "parameters": {"type": "object", "properties": {"novo_dia": {"type": "string", "description": "A nova data no formato AAAA-MM-DD"}, "nova_hora": {"type": "string", "description": "A nova hora no formato HH:MM"}, "id_antigo": {"type": "integer", "description": "O ID do agendamento a ser alterado, se houver mais de um."}}}}},
+         {"type": "function", "function": {"name": "cancelar_agendamentos", "description": "Cancela um ou mais agendamentos com base em uma lista de IDs.", "parameters": {"type": "object", "properties": {"ids_para_cancelar": {"type": "array", "items": {"type": "integer"}, "description": "Uma lista com os IDs numéricos dos agendamentos a cancelar."}}, "required": ["ids_para_cancelar"]}}},
          {"type": "function", "function": {"name": "consultar_horarios_disponiveis", "description": "Verifica os horários livres em um dia específico.", "parameters": {"type": "object", "properties": {"dia": {"type": "string", "description": "O dia a ser verificado no formato AAAA-MM-DD."}}, "required": ["dia"]}}},
          {"type": "function", "function": {"name": "consultar_meus_agendamentos", "description": "Lista agendamentos futuros confirmados.", "parameters": {"type": "object", "properties": {}}}},
-         {"type": "function", "function": {"name": "consultar_e_cancelar_inteligente", "description": "Cancela uma consulta. Pode receber o nome do procedimento como dica.", "parameters": {"type": "object", "properties": {"dica": {"type": "string", "description": "O procedimento que o usuário quer cancelar, se ele especificar."}}}}},
          {"type": "function", "function": {"name": "listar_todos_os_procedimentos", "description": "Lista todos os serviços e procedimentos oferecidos pela clínica.", "parameters": {"type": "object", "properties": {}}}},
          {"type": "function", "function": {"name": "consultar_precos_procedimentos", "description": "Consulta preços de procedimentos.", "parameters": {"type": "object", "properties": {"termo_busca": {"type": "string", "description": "O procedimento para saber o preço."}}, "required": ["termo_busca"]}}}]
 
 # ───────────────── 5. APP FASTAPI ───────────────────────────── #
-app = FastAPI(title="OdontoBot AI", description="Automação de WhatsApp para DI DONATO ODONTO.", version="10.0.0-final")
+app = FastAPI(title="OdontoBot AI", description="Automação de WhatsApp para DI DONATO ODONTO.", version="11.0.0-final-demo")
 @app.on_event("startup")
 async def startup_event(): await asyncio.to_thread(criar_tabelas); print("Tabelas verificadas/criadas.", flush=True);_ = SessionLocal(); with _ as db: popular_procedimentos_iniciais(db)
 @app.get("/")
@@ -183,17 +193,15 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
     db.add(HistoricoConversa(paciente_id=paciente.id, role="user", content=mensagem_usuario)); db.commit()
     historico_recente = db.query(HistoricoConversa).filter(HistoricoConversa.paciente_id == paciente.id, HistoricoConversa.timestamp >= datetime.utcnow() - timedelta(hours=24), HistoricoConversa.role != 'system').order_by(HistoricoConversa.timestamp).all()
     
-    NOME_CLINICA, PROFISSIONAL = "DI DONATO ODONTO", "Dra. Valéria Cristina Di Donato"
+    NOME_CLINICA, PROFISSIONAL = "Di Donato Odonto", "Dra. Valéria Cristina Di Donato"
     system_prompt = (
         f"**Persona:** Você é a Sofia, assistente virtual da clínica {NOME_CLINICA} "
         f"Seja sempre educada, prestativa e converse de forma natural. Hoje é {datetime.now().strftime('%d/%m/%Y')}.\n\n"
-        "**Fluxo de Trabalho:**\n"
-        "1. Se o usuário for novo ou a conversa for um simples 'olá', apenas se apresente e pergunte como pode ajudar.\n"
-        "2. Se o usuário expressar uma intenção clara (agendar, preço, etc.), seu primeiro passo é SEMPRE usar a ferramenta `obter_proxima_etapa` para verificar o cadastro.\n"
-        "3. Siga as instruções da ferramenta `obter_proxima_etapa` para guiar o paciente pelo cadastro, UM DADO POR VEZ.\n"
-        "4. Quando o cadastro estiver completo, a ferramenta te instruirá a prosseguir. Só então atenda ao pedido original do usuário.\n"
-        "5. Para AGENDAR, sempre use `consultar_horarios_disponiveis` antes, e depois apresente um resumo para confirmação antes de usar `agendar_consulta_inteligente`.\n"
-        "6. **CRÍTICO:** A ferramenta `agendar_consulta_inteligente` precisa de `dia` no formato AAAA-MM-DD e `hora` no formato HH:MM. Extraia essa informação da conversa para usar a ferramenta."
+        "**Regras de Fluxo:**\n"
+        "1. **Seja Reativa:** Responda diretamente a perguntas simples que não exigem cadastro (como preços ou lista de serviços), usando as ferramentas `consultar_precos_procedimentos` e `listar_todos_os_procedimentos`.\n"
+        "2. **Inicie o Cadastro na Hora Certa:** SOMENTE quando o usuário expressar uma intenção clara de AGENDAR, REAGENDAR ou CANCELAR, você deve iniciar o processo de cadastro usando a ferramenta `verificar_ou_coletar_dados_paciente`.\n"
+        "3. **Guie o Cadastro:** Siga as instruções da ferramenta de cadastro para pedir os dados faltantes UM DE CADA VEZ.\n"
+        "4. **Agendamento com Confirmação:** Após o cadastro estar completo, use as ferramentas de disponibilidade e, antes de agendar, apresente um resumo claro para o usuário confirmar. Só então use `agendar_consulta`."
     )
     
     mensagens_para_ia: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
