@@ -692,7 +692,13 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)) -> d
                 func = available_functions.get(fname)
                 if not func:
                     raise HTTPException(500, f"Função desconhecida: {fname}")
-                result = func(db=db, telefone_paciente=telefone, **f_args)
+
+                # Monta kwargs obrigatórios
+                kwargs: dict[str, Any] = {"db": db}
+                if "telefone_paciente" in func.__code__.co_varnames:  # type: ignore[attr-defined]
+                    kwargs["telefone_paciente"] = telefone
+
+                result = func(**kwargs, **f_args)
                 msgs_com_ferramentas.append(
                     {
                         "tool_call_id": call.id,
@@ -701,6 +707,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)) -> d
                         "content": result,
                     }
                 )
+
             resp = openrouter_chat_completion(
                 model=modelo_chat,
                 messages=msgs_com_ferramentas,
@@ -723,4 +730,5 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)) -> d
     db.commit()
 
     await enviar_resposta_whatsapp(telefone, resposta_final)
+    return {"status": "ok", "resposta": resposta_final}(telefone, resposta_final)
     return {"status": "ok", "resposta": resposta_final}
