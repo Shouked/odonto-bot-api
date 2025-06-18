@@ -1,10 +1,11 @@
-fastapi==0.115.1		
-uvicorn[standard]==0.30.1		
-python-dotenv==1.0.1		
-httpx==0.27.0		
-SQLAlchemy==2.0.30		
-psycopg2-binary==2.9.10		
-openai==1.26.0		
-pydantic==2.7.4
-pytz
-dateparser
+fastapi==0.115.1           # Framework web
+uvicorn[standard]==0.30.1  # ASGI server com extra 'standard' (gunicorn + uvloop)
+python-dotenv==1.0.1       # Variáveis de ambiente
+httpx==0.27.0              # HTTP assíncrono
+SQLAlchemy==2.0.30         # ORM
+psycopg2-binary==2.9.10    # Driver PostgreSQL (wheel pré-compilado)
+openai==1.26.0             # Cliente OpenAI / OpenRouter
+pydantic==2.7.4            # Validação de dados
+pytz==2024.1               # Fuso-horário BR
+dateparser==1.2.0          # Parsing de datas em português
+typing_extensions==4.12.0  # Tipagem extra p/ Python < 3.12
