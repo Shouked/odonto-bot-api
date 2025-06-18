@@ -1,11 +1,10 @@
 """
-API principal do OdontoBot AI — versão 14.0.2 (hot-fix)
+API principal do OdontoBot AI — versão 14.0.3
 ----------------------------------------------------------------
-Correções cumulativas:
-• remove rótulos “Ação/Resumo” das respostas
-• grava horários como naïve (sem fuso) e compara corretamente
-• elimina duplo return no webhook
-• data de nascimento agora é parseada de forma determinística (DD/MM/AAAA)
+▪ Grava nome completo automaticamente, mesmo se a IA enviar só o primeiro.
+▪ `consultar_horarios_disponiveis` lista todos os slots livres.
+▪ Prompt reforçado para a IA devolver `nome_completo` exatamente como digitado.
+▪ Mantém todas as correções anteriores (rótulos, datas naïve, etc.).
 """
 
 from __future__ import annotations
@@ -75,7 +74,6 @@ BR_TIMEZONE = pytz.timezone("America/Sao_Paulo")
 
 
 def get_now() -> datetime:
-    """Retorna timezone-aware (legado)."""
     return datetime.now(BR_TIMEZONE)
 
 
@@ -90,14 +88,6 @@ def to_naive_sp(dt: datetime) -> datetime:
     else:
         dt = dt.astimezone(BR_TIMEZONE)
     return dt.replace(tzinfo=None)
-
-
-def get_today_br() -> DateObject:
-    return get_now().date()
-
-
-def get_tomorrow_br() -> DateObject:
-    return get_today_br() + timedelta(days=1)
 
 
 BUSINESS_START = time(hour=9)
@@ -281,6 +271,17 @@ def parse_data_nascimento(s: str) -> Optional[datetime]:
     return parse_date(s, languages=["pt"], settings={"DATE_ORDER": "DMY"})
 
 
+NAME_RE = re.compile(r"^[A-Za-zÀ-ÖØ-öø-ÿ'´` ]{6,}$")  # ≥ 6 chars alfabéticos
+
+
+def tentar_salvar_nome(db: Session, paciente: Paciente, texto: str) -> None:
+    if paciente.nome_completo:
+        return
+    if NAME_RE.match(texto) and len(texto.split()) >= 2 and not re.search(r"\d", texto):
+        paciente.nome_completo = texto.strip()
+        db.commit()
+
+
 def buscar_ou_criar_paciente(db: Session, tel: str) -> Paciente:
     paciente = db.query(Paciente).filter_by(telefone=tel).first()
     if not paciente:
@@ -345,7 +346,7 @@ def consultar_horarios_disponiveis(db: Session, dia: str) -> str:
         cur += delta
     if not slots:
         return "Infelizmente não há horários disponíveis nesse dia."
-    return "Horários livres: " + ", ".join(s.strftime("%H:%M") for s in slots[:16]) + ". Qual prefere?"
+    return "Horários livres: " + ", ".join(s.strftime("%H:%M") for s in slots) + ". Qual prefere?"
 
 
 # ───────────── 5. FUNÇÃO CENTRAL DE AGENDAMENTO ─────────────────────────── #
@@ -526,7 +527,7 @@ tools: List[Dict[str, Any]] = [
 ]
 
 # ─────────────────────────────── 7. FASTAPI ──────────────────────────────── #
-app = FastAPI(title="OdontoBot AI", version="14.0.2")
+app = FastAPI(title="OdontoBot AI", version="14.0.3")
 
 
 @app.on_event("startup")
@@ -547,7 +548,7 @@ def health_head() -> Response:
     return Response(status_code=200)
 
 
-# ──────────────────────── 8. WEBHOOK MODELS ──────────────────────────────── #
+# ───────────────────────────── 8. WEBHOOK ────────────────────────────────── #
 class ZapiText(BaseModel):
     message: Optional[str] = None
 
@@ -562,7 +563,6 @@ class ZapiWebhookPayload(BaseModel):
     audio: Optional[ZapiAudio] = None
 
 
-# ─────────────────────────────── 9. UTILS ────────────────────────────────── #
 async def enviar_resposta_whatsapp(telefone: str, mensagem: str) -> None:
     url = f"{ZAPI_API_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     payload = {"phone": telefone, "message": mensagem}
@@ -575,7 +575,6 @@ async def enviar_resposta_whatsapp(telefone: str, mensagem: str) -> None:
             print("Falha ao enviar via Z-API:", exc, flush=True)
 
 
-# ───────────────────────────── 10. WEBHOOK ───────────────────────────────── #
 @app.post("/whatsapp/webhook")
 async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
     raw = await request.json()
@@ -584,8 +583,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)) -> D
     try:
         payload = ZapiWebhookPayload(**raw)
     except Exception as exc:  # noqa: BLE001
-        print("Payload inválido:", exc)
-        raise HTTPException(422, "Formato inválido")
+        raise HTTPException(422, "Formato inválido") from exc
 
     tel = payload.phone
     user_msg: Optional[str] = None
@@ -602,11 +600,12 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)) -> D
 
     if not user_msg:
         await enviar_resposta_whatsapp(
-            tel, "Olá! Sou a Sofia, assistente da DI DONATO ODONTO. Como posso ajudar?"
+            tel, "Olá! Sou Sofia, assistente da DI DONATO ODONTO. Como posso ajudar?"
         )
         return {"status": "saudacao"}
 
     paciente = buscar_ou_criar_paciente(db, tel)
+    tentar_salvar_nome(db, paciente, user_msg)  # salvamento automático de nome
     db.add(HistoricoConversa(paciente_id=paciente.id, role="user", content=user_msg))
     db.commit()
 
@@ -623,9 +622,9 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)) -> D
 
     system_prompt = (
         "Você é Sofia, assistente virtual da clínica DI DONATO ODONTO (Dra. Valéria Cristina). "
-        "Responda sempre em português BR. Não invente informações nem dê diagnósticos. "
-        f"Hoje é {get_now().strftime('%d/%m/%Y')}.\n\n"
-        "Fluxo: use ferramentas quando apropriado; aguarde confirmação quando necessário."
+        "Responda em português BR, nunca invente informações nem forneça diagnósticos. "
+        "Para horários, use apenas a função `consultar_horarios_disponiveis`. "
+        "Quando enviar nome completo, mantenha exatamente como o usuário digitou."
     )
 
     msgs: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
