@@ -730,5 +730,5 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)) -> d
     db.commit()
 
     await enviar_resposta_whatsapp(telefone, resposta_final)
-    return {"status": "ok", "resposta": resposta_final}(telefone, resposta_final)
+    return {"status": "ok", "resposta": resposta_final}
     return {"status": "ok", "resposta": resposta_final}
