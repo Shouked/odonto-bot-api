@@ -1,9 +1,9 @@
-﻿"""
-API principal do OdontoBot AI — versão 14.0.0 (corrigida).
-- Correções de bugs (paciente.id, implementação de consultar_horarios_disponiveis, checagem de ferramentas inexistentes)
-- Prompt endurecido para reduzir alucinação
-- Temperatura/top‑p ajustados (0.2 / 0.8)
-- Timeouts e logs aprimorados
+"""
+API principal do OdontoBot AI — versão 14.0.1 (hot-fix).
+Correções:
+• remove rótulos “Ação/Resumo” das respostas
+• grava horários como naïve (sem fuso) e compara corretamente
+• elimina duplo return no webhook
 """
 
 from __future__ import annotations
@@ -22,8 +22,19 @@ from dateparser import parse as parse_date
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
-from sqlalchemy import (Column, Date, DateTime, Float, ForeignKey, Integer,
-                        String, Text, and_, create_engine, func as sql_func)
+from sqlalchemy import (
+    Column,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    and_,
+    create_engine,
+    func as sql_func,
+)
 from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
 
 # ─────────────────────────────── 1. ENV/VARS ──────────────────────────────── #
@@ -60,8 +71,23 @@ if not all(
 
 BR_TIMEZONE = pytz.timezone("America/Sao_Paulo")
 
+
 def get_now() -> datetime:
+    """Retorna timezone-aware (legado)."""
     return datetime.now(BR_TIMEZONE)
+
+
+# NOVO ▸ utilidades naïve (sem tzinfo)
+def get_now_naive() -> datetime:
+    return datetime.now(BR_TIMEZONE).replace(tzinfo=None)
+
+
+def to_naive_sp(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        dt = BR_TIMEZONE.localize(dt)
+    else:
+        dt = dt.astimezone(BR_TIMEZONE)
+    return dt.replace(tzinfo=None)
 
 
 def get_today_br() -> DateObject:
@@ -140,7 +166,10 @@ class Agendamento(Base):
 
     id: int = Column(Integer, primary_key=True)
     paciente_id: int = Column(Integer, ForeignKey("pacientes.id"), nullable=False)
-    data_hora: datetime = Column(DateTime(timezone=True), nullable=False)
+
+    # ALTERADO ▸ timezone=False  -> grava naïve
+    data_hora: datetime = Column(DateTime(timezone=False), nullable=False)
+
     procedimento: str = Column(String, nullable=False)
     status: str = Column(String, default="confirmado")
 
@@ -186,7 +215,6 @@ def criar_tabelas() -> None:
 
 
 # ─────────────────── 3.1 POPULA PROCEDIMENTOS INICIAIS ────────────────────── #
-
 def popular_procedimentos_iniciais(db: Session) -> None:
     if db.query(Procedimento).first():
         return
@@ -228,6 +256,18 @@ def popular_procedimentos_iniciais(db: Session) -> None:
 
 
 # ─────────────────────────────── 4. TOOLS ─────────────────────────────────── #
+def limpar_rotulos(texto: str) -> str:
+    """Remove rótulos internos 'Ação:' / 'Resumo:' etc. da resposta."""
+    padroes = [
+        r"^\s*A[cç]ão:\s*",
+        r"^\s*Resumo:\s*",
+        r"^\s*Action:\s*",
+        r"^\s*Summary:\s*",
+    ]
+    for p in padroes:
+        texto = re.sub(p, "", texto, flags=re.IGNORECASE | re.MULTILINE)
+    return texto.strip()
+
 
 def buscar_ou_criar_paciente(db: Session, tel: str) -> Paciente:  # noqa: D401
     paciente = db.query(Paciente).filter_by(telefone=tel).first()
@@ -275,17 +315,23 @@ def consultar_precos_procedimentos(db: Session, termo_busca: str) -> str:
 
 
 # NOVO: disponibilidade de horários
-
 def consultar_horarios_disponiveis(db: Session, dia: str) -> str:
-    """Retorna horários livres em slots de 30 min, das 09:00 às 17:00."""
-
-    dia_obj = parse_date(dia, languages=["pt"], settings={"TO_TIMEZONE": "America/Sao_Paulo", "TIMEZONE": "America/Sao_Paulo"})
+    """Retorna horários livres em slots de 30 min, das 09:00 às 17:00."""
+    dia_obj = parse_date(
+        dia,
+        languages=["pt"],
+        settings={
+            "TO_TIMEZONE": "America/Sao_Paulo",
+            "TIMEZONE": "America/Sao_Paulo",
+        },
+    )
     if not dia_obj:
         return "Não entendi a data para verificar horários."
 
-    dia_br = BR_TIMEZONE.localize(dia_obj) if dia_obj.tzinfo is None else dia_obj.astimezone(BR_TIMEZONE)
-    dia_inicio = dia_br.replace(hour=BUSINESS_START.hour, minute=0, second=0, microsecond=0)
-    dia_fim = dia_br.replace(hour=BUSINESS_END.hour, minute=0, second=0, microsecond=0)
+    dia_naive = to_naive_sp(dia_obj)
+
+    dia_inicio = dia_naive.replace(hour=BUSINESS_START.hour, minute=0, second=0, microsecond=0)
+    dia_fim = dia_naive.replace(hour=BUSINESS_END.hour, minute=0, second=0, microsecond=0)
 
     ags = (
         db.query(Agendamento)
@@ -302,18 +348,18 @@ def consultar_horarios_disponiveis(db: Session, dia: str) -> str:
     cursor = dia_inicio
     delta = timedelta(minutes=SLOT_MINUTES)
     while cursor <= dia_fim - delta:
-        if cursor not in ocupados and cursor > get_now():
+        if cursor not in ocupados and cursor > get_now_naive():
             slots.append(cursor)
         cursor += delta
 
     if not slots:
-        return "Infelizmente não há horários disponíveis nesse dia."""
+        return "Infelizmente não há horários disponíveis nesse dia."
 
     formatted = ", ".join(s.strftime("%H:%M") for s in slots[:16])
     return f"Horários livres: {formatted}. Qual deles você prefere?"
 
-# ──────────── ferramenta central de agendamento & onboarding ──────────────── #
 
+# ─────────── ferramenta central de agendamento & onboarding ─────────────── #
 def processar_solicitacao_agendamento(
     db: Session,
     telefone_paciente: str,
@@ -362,7 +408,7 @@ def processar_solicitacao_agendamento(
         .filter(
             Agendamento.paciente_id == paciente.id,
             Agendamento.status == "confirmado",
-            Agendamento.data_hora >= get_now(),
+            Agendamento.data_hora >= get_now_naive(),
         )
         .order_by(Agendamento.data_hora)
         .all()
@@ -405,30 +451,26 @@ def processar_solicitacao_agendamento(
         if not dt_agendamento_obj:
             return "Não consegui entender a data e hora. Peça para o usuário tentar novamente de outra forma."
 
-        dt_agendamento_br = (
-            BR_TIMEZONE.localize(dt_agendamento_obj)
-            if dt_agendamento_obj.tzinfo is None
-            else dt_agendamento_obj.astimezone(BR_TIMEZONE)
-        )
+        dt_agendamento_naive = to_naive_sp(dt_agendamento_obj)
 
-        if not (BUSINESS_START <= dt_agendamento_br.time() <= BUSINESS_END):
+        if not (BUSINESS_START <= dt_agendamento_naive.time() <= BUSINESS_END):
             return "Atendemos apenas das 09:00 às 17:00. Por favor, escolha um horário nesse intervalo."
 
         conflito = (
             db.query(Agendamento)
-            .filter_by(data_hora=dt_agendamento_br, status="confirmado")
+            .filter_by(data_hora=dt_agendamento_naive, status="confirmado")
             .first()
         )
         if conflito:
             return (
-                f"Desculpe, o horário de {dt_agendamento_br.strftime('%H:%M')} já está ocupado. "
+                f"Desculpe, o horário de {dt_agendamento_naive.strftime('%H:%M')} já está ocupado. "
                 "Use a ferramenta `consultar_horarios_disponiveis` para ver outras opções."
             )
 
         if not confirmacao_usuario:
             resumo = (
                 "Ação: Peça a confirmação final ao usuário. Resumo: Agendamento de "
-                f"{procedimento_real} para {dt_agendamento_br.strftime('%d/%m/%Y às %H:%M')} com a Dra. "
+                f"{procedimento_real} para {dt_agendamento_naive.strftime('%d/%m/%Y às %H:%M')} com a Dra. "
                 "Valéria Cristina Di Donato. Está correto?"
             )
             return resumo
@@ -438,35 +480,34 @@ def processar_solicitacao_agendamento(
             db.add(
                 Agendamento(
                     paciente_id=paciente.id,
-                    data_hora=dt_agendamento_br,
+                    data_hora=dt_agendamento_naive,
                     procedimento=procedimento_real,
                 )
             )
             db.commit()
             return (
                 f"Sucesso! Agendamento para '{procedimento_real}' criado para "
-                f"{dt_agendamento_br.strftime('%d/%m/%Y às %H:%M')}."
+                f"{dt_agendamento_naive.strftime('%d/%m/%Y às %H:%M')}."
             )
         elif intencao == "reagendar":
             if not agendamentos_ativos:
                 return "Não há agendamento para reagendar."
-            agendamentos_ativos[0].data_hora = dt_agendamento_br
+            agendamentos_ativos[0].data_hora = dt_agendamento_naive
             db.commit()
             return (
-                f"Sucesso! Agendamento reagendado para {dt_agendamento_br.strftime('%d/%m/%Y às %H:%M')}."
+                f"Sucesso! Agendamento reagendado para {dt_agendamento_naive.strftime('%d/%m/%Y às %H:%M')}."
             )
 
     return "Não entendi a solicitação. Por favor, pergunte ao usuário o que ele deseja fazer."
 
 
-# ───────────────────────── FUNÇÕES DISPONÍVEIS ────────────────────────────── #
+# ───────────────────────── FUNÇÕES DISPONÍVEIS ───────────────────────────── #
 available_functions: dict[str, Any] = {
     "processar_solicitacao_agendamento": processar_solicitacao_agendamento,
     "listar_todos_os_procedimentos": listar_todos_os_procedimentos,
     "consultar_precos_procedimentos": consultar_precos_procedimentos,
     "consultar_horarios_disponiveis": consultar_horarios_disponiveis,
 }
-
 
 tools: list[dict[str, Any]] = [
     {
@@ -543,7 +584,7 @@ tools: list[dict[str, Any]] = [
 ]
 
 # ─────────────────────────────── 5. FASTAPI ──────────────────────────────── #
-app = FastAPI(title="OdontoBot AI", version="14.0.0")
+app = FastAPI(title="OdontoBot AI", version="14.0.1")
 
 
 @app.on_event("startup")
@@ -581,9 +622,7 @@ class ZapiWebhookPayload(BaseModel):
 
 # ─────────────────────────────── 7. UTILS ────────────────────────────────── #
 async def enviar_resposta_whatsapp(telefone: str, mensagem: str) -> None:
-    url = (
-        f"{ZAPI_API_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
-    )
+    url = f"{ZAPI_API_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     payload = {"phone": telefone, "message": mensagem}
     headers = {"Content-Type": "application/json", "Client-Token": ZAPI_CLIENT_TOKEN}
     async with httpx.AsyncClient(timeout=30) as client:
@@ -631,9 +670,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)) -> d
 
     paciente = buscar_ou_criar_paciente(db, tel=telefone)
     db.add(
-        HistoricoConversa(
-            paciente_id=paciente.id, role="user", content=mensagem_usuario
-        )
+        HistoricoConversa(paciente_id=paciente.id, role="user", content=mensagem_usuario)
     )
     db.commit()
 
@@ -717,18 +754,16 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)) -> d
             )
             ai_msg = resp.choices[0].message  # type: ignore[index]
 
-        resposta_final = ai_msg.content
+        resposta_final = limpar_rotulos(ai_msg.content or "")
+
     except Exception as exc:  # noqa: BLE001
         print("Erro na interação IA:", exc, flush=True)
         resposta_final = "Desculpe, ocorreu um problema técnico. Tente novamente mais tarde."
 
     db.add(
-        HistoricoConversa(
-            paciente_id=paciente.id, role="assistant", content=resposta_final
-        )
+        HistoricoConversa(paciente_id=paciente.id, role="assistant", content=resposta_final)
     )
     db.commit()
 
     await enviar_resposta_whatsapp(telefone, resposta_final)
-    return {"status": "ok", "resposta": resposta_final}
     return {"status": "ok", "resposta": resposta_final}
