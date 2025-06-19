@@ -1,17 +1,11 @@
 """
-OdontoBot AI – main.py – v16.1.0-Polished
+OdontoBot AI – main.py – v16.1.1-Hotfix
 ────────────────────────────────────────────────────────────────────────────
-• REFINAMENTO CRÍTICO: Foco na robustez e no fluxo de raciocínio da IA.
-• NOVA FERRAMENTA "check_onboarding_status": Adicionada uma ferramenta para
-  a IA verificar proativamente se o cadastro do paciente está completo
-  ANTES de tentar agendar, tornando o fluxo mais lógico e humano.
-• PROMPT DE SISTEMA APRIMORADO: As diretrizes agora instruem a IA a seguir
-  uma sequência de verificação (checar cadastro -> pedir dados se necessário
-  -> agendar), emulando um raciocínio mais humano.
-• ROBUSTEZ NO AGENDAMENTO: A ferramenta 'schedule_appointment' foi
-  simplificada para focar apenas em sua tarefa principal.
-• ADICIONADO SEEDING DE PROCEDIMENTOS: Incluído o código para popular
-  o banco de dados, tornando o script totalmente autocontido.
+• CORREÇÃO CRÍTICA (HOTFIX): Reintroduzida a rota principal (`/`) com os
+  métodos GET e HEAD. A ausência desta rota estava fazendo com que os
+  testes de saúde (health checks) do Render falhassem, resultando em um
+  loop de reinicialização do serviço e impedindo o bot de responder.
+• Esta correção garante que o serviço permaneça online e operacional.
 """
 
 # ───────────────── 1. IMPORTS & SETUP ─────────────
@@ -27,7 +21,7 @@ import httpx
 import pytz
 from dateparser import parse as parse_date
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import (Column, Date, DateTime, Float, ForeignKey, Integer,
                         String, Text, create_engine)
@@ -36,7 +30,6 @@ from sqlalchemy.orm import Session, declarative_base, sessionmaker
 # ───────────────── 2. ENVIRONMENT & CONSTANTS ─────────────
 load_dotenv()
 
-# Validação de variáveis de ambiente
 required_env_vars = ["DATABASE_URL", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "ZAPI_API_URL", "ZAPI_INSTANCE_ID", "ZAPI_TOKEN", "ZAPI_CLIENT_TOKEN"]
 for var in required_env_vars:
     if not os.getenv(var):
@@ -50,7 +43,6 @@ ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 ZAPI_CLIENT_TOKEN = os.getenv("ZAPI_CLIENT_TOKEN")
 
-# Constantes de negócio
 BR_TIMEZONE = pytz.timezone("America/Sao_Paulo")
 BUSINESS_START_HOUR, BUSINESS_END_HOUR = 9, 18
 SLOT_DURATION_MINUTES = 30
@@ -64,8 +56,7 @@ try:
     import openai
     openai_whisper_client = openai.OpenAI(api_key=OPENAI_API_KEY)
     openrouter_client = openai.OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=OPENROUTER_API_KEY,
+        base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY,
         default_headers={"HTTP-Referer": "https://github.com/Shouked/odonto-bot-api", "X-Title": "OdontoBot AI"},
         timeout=httpx.Timeout(45.0)
     )
@@ -78,57 +69,36 @@ def openrouter_chat_completion(**kwargs):
 async def transcribe_audio_whisper(audio_url: str) -> Optional[str]:
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(audio_url)
-            response.raise_for_status()
-        transcription = await asyncio.to_thread(
-            openai_whisper_client.audio.transcriptions.create,
-            model="whisper-1", file=("audio.ogg", response.content, "audio/ogg")
-        )
+            response = await client.get(audio_url); response.raise_for_status()
+        transcription = await asyncio.to_thread(openai_whisper_client.audio.transcriptions.create, model="whisper-1", file=("audio.ogg", response.content, "audio/ogg"))
         return transcription.text
     except Exception as e:
-        print(f"Erro na transcrição de áudio: {e}", flush=True)
-        return None
+        print(f"Erro na transcrição de áudio: {e}", flush=True); return None
 
 # ───────────────── 4. DATABASE (ORM) ─────────────
 Base = declarative_base()
-
 class Paciente(Base):
     __tablename__ = "pacientes"
-    id = Column(Integer, primary_key=True)
-    nome_completo = Column(String); primeiro_nome = Column(String)
-    telefone = Column(String, unique=True, nullable=False)
-    email = Column(String); data_nascimento = Column(Date)
-
+    id = Column(Integer, primary_key=True); nome_completo = Column(String); primeiro_nome = Column(String)
+    telefone = Column(String, unique=True, nullable=False); email = Column(String); data_nascimento = Column(Date)
 class Agendamento(Base):
     __tablename__ = "agendamentos"
-    id = Column(Integer, primary_key=True)
-    paciente_id = Column(Integer, ForeignKey("pacientes.id"), nullable=False)
-    data_hora = Column(DateTime(timezone=True), nullable=False)
-    procedimento = Column(String, nullable=False)
-    status = Column(String, default="confirmado")
-
+    id = Column(Integer, primary_key=True); paciente_id = Column(Integer, ForeignKey("pacientes.id"), nullable=False)
+    data_hora = Column(DateTime(timezone=True), nullable=False); procedimento = Column(String, nullable=False); status = Column(String, default="confirmado")
 class HistoricoConversa(Base):
     __tablename__ = "historico_conversas"
-    id = Column(Integer, primary_key=True)
-    paciente_id = Column(Integer, ForeignKey("pacientes.id"), nullable=False)
-    role = Column(String, nullable=False)
-    content = Column(Text, nullable=False)
-    timestamp = Column(DateTime(timezone=True), default=get_now)
-
+    id = Column(Integer, primary_key=True); paciente_id = Column(Integer, ForeignKey("pacientes.id"), nullable=False)
+    role = Column(String, nullable=False); content = Column(Text, nullable=False); timestamp = Column(DateTime(timezone=True), default=get_now)
 class Procedimento(Base):
     __tablename__ = "procedimentos"
-    id = Column(Integer, primary_key=True)
-    nome = Column(String, unique=True, nullable=False)
-    categoria = Column(String, index=True)
-    descricao = Column(Text)
-    valor_descritivo = Column(String, nullable=False)
-    valor_base = Column(Float)
+    id = Column(Integer, primary_key=True); nome = Column(String, unique=True, nullable=False); categoria = Column(String, index=True)
+    descricao = Column(Text); valor_descritivo = Column(String, nullable=False); valor_base = Column(Float)
 
 engine = create_engine(DATABASE_URL, pool_recycle=300)
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
 def get_db():
-    db = SessionLocal()
+    db = SessionLocal();
     try: yield db
     finally: db.close()
 
@@ -154,15 +124,13 @@ def initialize_database(db: Session):
 # ───────────────── 5. HELPER FUNCTIONS ─────────────
 def find_or_create_patient(db: Session, phone: str) -> Paciente:
     patient = db.query(Paciente).filter_by(telefone=phone).first()
-    if not patient:
-        patient = Paciente(telefone=phone)
-        db.add(patient); db.commit(); db.refresh(patient)
+    if not patient: patient = Paciente(telefone=phone); db.add(patient); db.commit(); db.refresh(patient)
     return patient
 
 # ───────────────── 6. TOOL FUNCTIONS (Polished Architecture) ─────────────
 def get_procedure_list(db: Session) -> str:
     procedimentos = db.query(Procedimento).order_by(Procedimento.categoria, Procedimento.nome).all()
-    if not procedimentos: return "Não consegui carregar nossa lista de procedimentos. Nossa equipe pode te ajudar com isso."
+    if not procedimentos: return "Não consegui carregar nossa lista de procedimentos. Nossa equipe pode te ajudar."
     categorias = defaultdict(list)
     for p in procedimentos: categorias[p.categoria].append(p.nome)
     resposta = "Claro! Nós oferecemos uma variedade de serviços para cuidar do seu sorriso. Eles incluem:\n\n"
@@ -172,7 +140,7 @@ def get_procedure_list(db: Session) -> str:
 def get_procedure_details(db: Session, procedure_name: str) -> str:
     resultado = db.query(Procedimento).filter(Procedimento.nome.ilike(f"%{procedure_name.strip()}%")).first()
     if not resultado: return f"Não encontrei um procedimento chamado '{procedure_name}'. Quer que eu liste todos os nossos serviços?"
-    resposta = f"Sobre o procedimento *{resultado.nome}*:\n\n"
+    resposta = f"Sobre o procedimento *{resultado.nome}*:\n\n";
     if resultado.descricao: resposta += f"_{resultado.descricao}_\n\n"
     return resposta + f"O valor é: *{resultado.valor_descritivo}*."
 
@@ -201,7 +169,7 @@ def schedule_appointment(db: Session, patient_id: int, datetime_str: str, proced
     patient = db.query(Paciente).get(patient_id)
     new_appointment = Agendamento(paciente_id=patient_id, data_hora=dt_aware, procedimento=procedure, status="confirmado")
     db.add(new_appointment); db.commit()
-    return f"Perfeito, {patient.primeiro_nome}! Seu agendamento para *{procedure}* foi confirmado com sucesso para o dia *{dt_aware.strftime('%d/%m/%Y às %H:%M')}*. Você receberá um lembrete um dia antes. Estamos ansiosos para te ver!"
+    return f"Perfeito, {patient.primeiro_nome}! Seu agendamento para *{procedure}* foi confirmado para o dia *{dt_aware.strftime('%d/%m/%Y às %H:%M')}*. Você receberá um lembrete. Até lá!"
 
 def cancel_appointment(db: Session, patient_id: int) -> str:
     upcoming = db.query(Agendamento).filter(Agendamento.paciente_id == patient_id, Agendamento.status == "confirmado", Agendamento.data_hora > get_now()).order_by(Agendamento.data_hora.asc()).first()
@@ -221,7 +189,7 @@ def update_patient_info(db: Session, patient_id: int, full_name: str = None, ema
         if not parsed_date: return "Não entendi essa data. Poderia me informar no formato DD/MM/AAAA?"
         patient.data_nascimento = parsed_date.date()
     db.commit()
-    return check_onboarding_status(db, patient_id) # Retorna o status atualizado
+    return check_onboarding_status(db, patient_id)
 
 def check_onboarding_status(db: Session, patient_id: int) -> str:
     patient = db.query(Paciente).get(patient_id)
@@ -233,12 +201,24 @@ def check_onboarding_status(db: Session, patient_id: int) -> str:
     return f"CADASTRO_INCOMPLETO. Faltando: {', '.join(missing_info)}."
 
 # ───────────────── 7. APP & WEBHOOK SETUP ─────────────
-app = FastAPI(title="OdontoBot AI", version="16.1.0-Polished")
+app = FastAPI(title="OdontoBot AI", version="16.1.1-Hotfix")
 
 @app.on_event("startup")
 def startup_event():
     with SessionLocal() as db: initialize_database(db)
     print(f"🚀 API OdontoBot v{app.version} iniciada com sucesso!", flush=True)
+
+# <<< INÍCIO DA CORREÇÃO >>>
+@app.get("/", summary="Health Check")
+def health_check_get():
+    """Endpoint para health checks (testes de saúde) do Render (GET)."""
+    return {"status": "ok", "version": app.version}
+
+@app.head("/", summary="Health Check")
+def health_check_head():
+    """Endpoint para health checks (testes de saúde) do Render (HEAD)."""
+    return Response(status_code=200)
+# <<< FIM DA CORREÇÃO >>>
 
 class ZapiText(BaseModel): message: Optional[str] = None
 class ZapiAudio(BaseModel): audioUrl: Optional[str] = None
@@ -293,7 +273,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
 
     try:
         final_answer = ""
-        for _ in range(5): # Aumentado para 5 iterações para acomodar o fluxo de onboarding
+        for _ in range(5):
             response = openrouter_chat_completion(model="google/gemini-2.5-flash", messages=messages, tools=TOOLS_DEFINITION, tool_choice="auto")
             ai_message = response.choices[0].message
             messages.append(ai_message)
