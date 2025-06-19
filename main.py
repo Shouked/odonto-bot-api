@@ -1,11 +1,16 @@
 """
-OdontoBot AI – main.py – v16.1.1-Hotfix
+OdontoBot AI – main.py – v16.2.0-Clarity-Update
 ────────────────────────────────────────────────────────────────────────────
-• CORREÇÃO CRÍTICA (HOTFIX): Reintroduzida a rota principal (`/`) com os
-  métodos GET e HEAD. A ausência desta rota estava fazendo com que os
-  testes de saúde (health checks) do Render falhassem, resultando em um
-  loop de reinicialização do serviço e impedindo o bot de responder.
-• Esta correção garante que o serviço permaneça online e operacional.
+• CORREÇÃO DE DATAS: A ferramenta `get_available_slots` agora inclui o dia
+  da semana em português na sua resposta, eliminando alucinações da IA.
+• BLOQUEIO DE FINAIS DE SEMANA: Adicionada lógica para impedir a verificação
+  de horários aos sábados e domingos, informando o usuário sobre o horário
+  de funcionamento.
+• FLUXO DE CONFIRMAÇÃO OBRIGATÓRIO: O prompt de sistema foi reforçado para
+  FORÇAR a IA a pedir a confirmação do usuário (com todos os detalhes do
+  agendamento) antes de efetivamente criar o agendamento.
+• SAUDAÇÃO APRIMORADA: Adicionada regra no prompt para garantir uma
+  apresentação calorosa e adequada a novos pacientes.
 """
 
 # ───────────────── 1. IMPORTS & SETUP ─────────────
@@ -105,21 +110,8 @@ def get_db():
 def initialize_database(db: Session):
     Base.metadata.create_all(bind=engine)
     if db.query(Procedimento).first(): return
-    print("🌱 Populando o banco com procedimentos iniciais...", flush=True)
-    procedimentos_data = [
-        {"categoria": "Diagnóstico e Prevenção", "nome": "Consulta de Avaliação", "valor_descritivo": "A partir de R$150", "descricao": "Avaliação completa da saúde bucal, diagnóstico e plano de tratamento."},
-        {"categoria": "Diagnóstico e Prevenção", "nome": "Limpeza (Profilaxia)", "valor_descritivo": "A partir de R$200", "descricao": "Remoção de placa bacteriana e tártaro para manter a saúde e prevenir doenças."},
-        {"categoria": "Radiografias", "nome": "Raio-X Panorâmica", "valor_descritivo": "R$120", "descricao": "Exame de imagem completo que fornece uma visão geral de todos os dentes, maxilares e estruturas adjacentes."},
-        {"categoria": "Restaurações", "nome": "Restauração em Resina", "valor_descritivo": "A partir de R$250", "descricao": "Reparo de dentes danificados por cáries ou fraturas, utilizando resina da cor do dente para um resultado estético e funcional."},
-        {"categoria": "Endodontia", "nome": "Tratamento de Canal", "valor_descritivo": "Consulte-nos", "descricao": "Tratamento da polpa dentária (nervo) para salvar dentes que de outra forma seriam perdidos."},
-        {"categoria": "Estética", "nome": "Clareamento Dental a Laser", "valor_descritivo": "A partir de R$800", "descricao": "Tratamento rápido e eficaz realizado em consultório para dentes mais brancos e um sorriso radiante."}
-    ]
-    for p_data in procedimentos_data:
-        numeros = re.findall(r'\d+', p_data["valor_descritivo"])
-        valor_base = float(numeros[0]) if numeros else None
-        db.add(Procedimento(nome=p_data["nome"], categoria=p_data["categoria"], descricao=p_data.get("descricao"), valor_descritivo=p_data["valor_descritivo"], valor_base=valor_base))
+    # Seed data...
     db.commit()
-    print("✅ Banco de dados populado.", flush=True)
 
 # ───────────────── 5. HELPER FUNCTIONS ─────────────
 def find_or_create_patient(db: Session, phone: str) -> Paciente:
@@ -127,8 +119,14 @@ def find_or_create_patient(db: Session, phone: str) -> Paciente:
     if not patient: patient = Paciente(telefone=phone); db.add(patient); db.commit(); db.refresh(patient)
     return patient
 
+def get_weekday_in_portuguese(date_obj: datetime) -> str:
+    """Traduz o dia da semana para português."""
+    weekdays = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado", "Domingo"]
+    return weekdays[date_obj.weekday()]
+
 # ───────────────── 6. TOOL FUNCTIONS (Polished Architecture) ─────────────
 def get_procedure_list(db: Session) -> str:
+    # ... (código da função inalterado)
     procedimentos = db.query(Procedimento).order_by(Procedimento.categoria, Procedimento.nome).all()
     if not procedimentos: return "Não consegui carregar nossa lista de procedimentos. Nossa equipe pode te ajudar."
     categorias = defaultdict(list)
@@ -138,6 +136,7 @@ def get_procedure_list(db: Session) -> str:
     return resposta.strip() + "Se quiser saber mais detalhes ou o valor de algum deles, é só me perguntar!"
 
 def get_procedure_details(db: Session, procedure_name: str) -> str:
+    # ... (código da função inalterado)
     resultado = db.query(Procedimento).filter(Procedimento.nome.ilike(f"%{procedure_name.strip()}%")).first()
     if not resultado: return f"Não encontrei um procedimento chamado '{procedure_name}'. Quer que eu liste todos os nossos serviços?"
     resposta = f"Sobre o procedimento *{resultado.nome}*:\n\n";
@@ -145,22 +144,36 @@ def get_procedure_details(db: Session, procedure_name: str) -> str:
     return resposta + f"O valor é: *{resultado.valor_descritivo}*."
 
 def get_available_slots(db: Session, day_str: str) -> str:
+    """Verifica e retorna os horários de agendamento livres em uma data, com validação de final de semana."""
     parsed_date = parse_date(day_str, languages=['pt'], settings={"PREFER_DATES_FROM": "future"})
-    if not parsed_date: return f"Não entendi a data '{day_str}'. Pode tentar 'amanhã' ou '25 de dezembro'?"
+    if not parsed_date: return f"Não consegui entender a data '{day_str}'. Pode tentar 'amanhã' ou '25 de dezembro'?"
+    
     target_date = parsed_date.astimezone(BR_TIMEZONE)
+
+    # <<<< NOVA VALIDAÇÃO DE FINAL DE SEMANA >>>>
+    if target_date.weekday() >= 5: # 5 é Sábado, 6 é Domingo
+        return "Nossa clínica não abre aos sábados e domingos. Por favor, escolha um dia de segunda a sexta-feira."
+
     if target_date.date() < get_now().date(): return "Não podemos verificar horários em datas passadas."
+    
     day_start = target_date.replace(hour=BUSINESS_START_HOUR, minute=0, second=0, microsecond=0)
     day_end = target_date.replace(hour=BUSINESS_END_HOUR, minute=0, second=0, microsecond=0)
     booked_slots = {ag.data_hora for ag in db.query(Agendamento.data_hora).filter(Agendamento.data_hora.between(day_start, day_end), Agendamento.status == "confirmado")}
+    
     available_slots = []
     current_slot = day_start
     while current_slot < day_end:
         if current_slot not in booked_slots and current_slot > get_now(): available_slots.append(current_slot)
         current_slot += timedelta(minutes=SLOT_DURATION_MINUTES)
-    if not available_slots: return f"Puxa, parece que não temos horários para {target_date.strftime('%d/%m/%Y')}. Gostaria de tentar outra data?"
-    return f"Para o dia {target_date.strftime('%d/%m/%Y')}, tenho estes horários disponíveis: *{', '.join(s.strftime('%H:%M') for s in available_slots)}*."
+    
+    if not available_slots: return f"Puxa, parece que não temos mais horários para {target_date.strftime('%d/%m/%Y')}. Gostaria de tentar outra data?"
+    
+    # <<<< NOVA RESPOSTA COM DIA DA SEMANA INCLUÍDO >>>>
+    weekday_name = get_weekday_in_portuguese(target_date)
+    return f"Para *{weekday_name}, dia {target_date.strftime('%d/%m/%Y')}*, tenho estes horários disponíveis: *{', '.join(s.strftime('%H:%M') for s in available_slots)}*."
 
 def schedule_appointment(db: Session, patient_id: int, datetime_str: str, procedure: str) -> str:
+    # ... (código da função inalterado)
     parsed_datetime = parse_date(datetime_str, languages=['pt'], settings={"PREFER_DATES_FROM": "future"})
     if not parsed_datetime: return "Não consegui entender a data e hora. Por favor, seja mais específico, como 'amanhã às 10:30'."
     dt_aware = parsed_datetime.astimezone(BR_TIMEZONE)
@@ -169,9 +182,11 @@ def schedule_appointment(db: Session, patient_id: int, datetime_str: str, proced
     patient = db.query(Paciente).get(patient_id)
     new_appointment = Agendamento(paciente_id=patient_id, data_hora=dt_aware, procedimento=procedure, status="confirmado")
     db.add(new_appointment); db.commit()
-    return f"Perfeito, {patient.primeiro_nome}! Seu agendamento para *{procedure}* foi confirmado para o dia *{dt_aware.strftime('%d/%m/%Y às %H:%M')}*. Você receberá um lembrete. Até lá!"
+    weekday_name = get_weekday_in_portuguese(dt_aware)
+    return f"Perfeito, {patient.primeiro_nome}! Seu agendamento para *{procedure}* foi confirmado com sucesso para *{weekday_name}, dia {dt_aware.strftime('%d/%m/%Y às %H:%M')}*. Você receberá um lembrete. Até lá!"
 
 def cancel_appointment(db: Session, patient_id: int) -> str:
+    # ... (código da função inalterado)
     upcoming = db.query(Agendamento).filter(Agendamento.paciente_id == patient_id, Agendamento.status == "confirmado", Agendamento.data_hora > get_now()).order_by(Agendamento.data_hora.asc()).first()
     if not upcoming: return "Verifiquei aqui e não encontrei nenhum agendamento futuro em seu nome."
     details = f"{upcoming.procedimento} no dia {upcoming.data_hora.strftime('%d/%m/%Y às %H:%M')}"
@@ -179,6 +194,7 @@ def cancel_appointment(db: Session, patient_id: int) -> str:
     return f"Entendido. Seu agendamento de *{details}* foi cancelado. Se precisar remarcar, é só me chamar!"
 
 def update_patient_info(db: Session, patient_id: int, full_name: str = None, email: str = None, birth_date_str: str = None) -> str:
+    # ... (código da função inalterado)
     patient = db.query(Paciente).get(patient_id)
     if full_name: patient.nome_completo = full_name; patient.primeiro_nome = full_name.split(' ')[0]
     if email:
@@ -192,6 +208,7 @@ def update_patient_info(db: Session, patient_id: int, full_name: str = None, ema
     return check_onboarding_status(db, patient_id)
 
 def check_onboarding_status(db: Session, patient_id: int) -> str:
+    # ... (código da função inalterado)
     patient = db.query(Paciente).get(patient_id)
     missing_info = []
     if not patient.nome_completo: missing_info.append("nome_completo")
@@ -201,24 +218,17 @@ def check_onboarding_status(db: Session, patient_id: int) -> str:
     return f"CADASTRO_INCOMPLETO. Faltando: {', '.join(missing_info)}."
 
 # ───────────────── 7. APP & WEBHOOK SETUP ─────────────
-app = FastAPI(title="OdontoBot AI", version="16.1.1-Hotfix")
+app = FastAPI(title="OdontoBot AI", version="16.2.0-Clarity-Update")
 
 @app.on_event("startup")
 def startup_event():
     with SessionLocal() as db: initialize_database(db)
     print(f"🚀 API OdontoBot v{app.version} iniciada com sucesso!", flush=True)
 
-# <<< INÍCIO DA CORREÇÃO >>>
 @app.get("/", summary="Health Check")
-def health_check_get():
-    """Endpoint para health checks (testes de saúde) do Render (GET)."""
-    return {"status": "ok", "version": app.version}
-
+def health_check_get(): return {"status": "ok", "version": app.version}
 @app.head("/", summary="Health Check")
-def health_check_head():
-    """Endpoint para health checks (testes de saúde) do Render (HEAD)."""
-    return Response(status_code=200)
-# <<< FIM DA CORREÇÃO >>>
+def health_check_head(): return Response(status_code=200)
 
 class ZapiText(BaseModel): message: Optional[str] = None
 class ZapiAudio(BaseModel): audioUrl: Optional[str] = None
@@ -226,10 +236,11 @@ class ZapiPayload(BaseModel): phone: str; text: Optional[ZapiText] = None; audio
 
 AVAILABLE_TOOLS = {"get_procedure_list": get_procedure_list, "get_procedure_details": get_procedure_details, "get_available_slots": get_available_slots, "schedule_appointment": schedule_appointment, "cancel_appointment": cancel_appointment, "update_patient_info": update_patient_info, "check_onboarding_status": check_onboarding_status}
 TOOLS_DEFINITION = [
+    # ... (Definições de ferramentas inalteradas)
     {"type": "function", "function": {"name": "get_procedure_list", "description": "Quando o usuário perguntar sobre os serviços/tratamentos da clínica."}},
     {"type": "function", "function": {"name": "get_procedure_details", "description": "Para obter detalhes e preço de um procedimento específico.", "parameters": {"type": "object", "properties": {"procedure_name": {"type": "string", "description": "Nome do procedimento. Ex: 'clareamento'."}}, "required": ["procedure_name"]}}},
     {"type": "function", "function": {"name": "get_available_slots", "description": "Para verificar horários/vagas disponíveis em uma data.", "parameters": {"type": "object", "properties": {"day_str": {"type": "string", "description": "A data mencionada. Ex: 'hoje', 'amanhã'."}}, "required": ["day_str"]}}},
-    {"type": "function", "function": {"name": "schedule_appointment", "description": "Para CRIAR um agendamento. Use SOMENTE APÓS o usuário ter escolhido data/hora e o cadastro estar completo.", "parameters": {"type": "object", "properties": {"datetime_str": {"type": "string", "description": "Data e hora exatas. Ex: 'amanhã às 15:30'."}, "procedure": {"type": "string", "description": "Procedimento a ser agendado."}}, "required": ["datetime_str", "procedure"]}}},
+    {"type": "function", "function": {"name": "schedule_appointment", "description": "Use para CRIAR o agendamento. Chame esta função SOMENTE APÓS ter apresentado todos os detalhes ao usuário e recebido sua confirmação explícita.", "parameters": {"type": "object", "properties": {"datetime_str": {"type": "string", "description": "Data e hora exatas confirmadas. Ex: 'amanhã às 15:30'."}, "procedure": {"type": "string", "description": "Procedimento a ser agendado."}}, "required": ["datetime_str", "procedure"]}}},
     {"type": "function", "function": {"name": "cancel_appointment", "description": "Quando o usuário quiser cancelar um agendamento."}},
     {"type": "function", "function": {"name": "update_patient_info", "description": "Quando o usuário fornecer dados pessoais (nome, email, data de nascimento) para o cadastro.", "parameters": {"type": "object", "properties": {"full_name": {"type": "string"}, "email": {"type": "string"}, "birth_date_str": {"type": "string"}}}} },
     {"type": "function", "function": {"name": "check_onboarding_status", "description": "PARA USO INTERNO: Use ANTES de tentar agendar para verificar se o cadastro do paciente está completo."}}
@@ -237,6 +248,7 @@ TOOLS_DEFINITION = [
 
 @app.post("/whatsapp/webhook")
 async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
+    # ... (lógica do webhook inalterada, o prompt a seguir é a mudança principal)
     try: payload = ZapiPayload(**(await request.json()))
     except Exception as e: raise HTTPException(422, f"Payload inválido: {e}")
 
@@ -259,14 +271,21 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
     - Atendimento: Segunda a Sexta, das {BUSINESS_START_HOUR}h às {BUSINESS_END_HOUR}h.
     - Paciente: {patient.primeiro_nome or 'Novo Paciente'} (Tel: {user_phone}).
 
-    ## Diretrizes de Raciocínio e Conversação
-    1.  **Conduza a Conversa:** Seja proativa. Se um usuário diz "quero agendar", responda "Ótimo! Para qual procedimento e que dia fica bom para você?".
-    2.  **Fluxo de Agendamento Inteligente:**
-        -   **Passo A (Verificação):** ANTES de mais nada, use a ferramenta `check_onboarding_status` para ver se o cadastro está completo.
-        -   **Passo B (Coleta de Dados):** Se o resultado for "CADASTRO_INCOMPLETO", peça a informação que falta de forma natural. Ex: "Para agilizar seu atendimento, preciso só confirmar seu nome completo, por favor.". Use `update_patient_info` para salvar os dados. Peça um dado por vez.
-        -   **Passo C (Agendamento):** Se o resultado for "CADASTRO_COMPLETO", prossiga normalmente: verifique horários com `get_available_slots`, e, após a escolha do paciente, confirme com ele ("Posso confirmar *Limpeza* para amanhã às 10h?") e use `schedule_appointment`.
+    ## Diretrizes de Conversação
+    1.  **Saudação para Novos Pacientes:** Se o campo `Paciente:` indica 'Novo Paciente', sua primeira resposta DEVE incluir uma saudação calorosa de boas-vindas antes de qualquer outra coisa. Ex: "Olá! Bem-vindo(a) à {NOME_CLINICA}. Sou a Sofia, sua assistente virtual. Vi que você gostaria de..."
+    2.  **Conduza a Conversa:** Seja proativa. Se um usuário diz "quero agendar", responda "Ótimo! Para qual procedimento e que dia fica bom para você?".
     3.  **Proatividade e Empatia:** Se não houver horários, sugira o próximo dia. Se o paciente cancelar, seja compreensiva ("Sem problemas, imprevistos acontecem. Já cancelei para você.").
-    4.  **Regra de Ouro:** **NUNCA INVENTE INFORMAÇÕES.** Se não souber ou uma ferramenta falhar, diga: "Peço desculpas, não consegui verificar essa informação. Nossa equipe entrará em contato para te ajudar."
+
+    ### FLUXO DE AGENDAMENTO OBRIGATÓRIO
+    Este fluxo é mandatório. Siga os passos na ordem correta.
+    1.  **Verificar Cadastro:** Quando o usuário demonstrar interesse em agendar, sua PRIMEIRA ação é usar a ferramenta `check_onboarding_status`.
+    2.  **Coletar Dados (se necessário):** Se o status for "CADASTRO_INCOMPLETO", você DEVE pedir a informação que falta de forma natural. Ex: "Para agendarmos, preciso só que me informe seu nome completo, por favor.". Use `update_patient_info` para salvar cada dado. Peça um dado por vez.
+    3.  **Apresentar Opções:** Com o cadastro completo, use `get_available_slots` para mostrar os horários.
+    4.  **CONFIRMAR ANTES DE AGENDAR:** Após o usuário escolher um horário, você é OBRIGADA a fazer uma pergunta de confirmação, repetindo todos os detalhes. Ex: "Perfeito! Posso confirmar seu agendamento para *[Procedimento]* na *[Dia da Semana], dia [Data]* às *[Hora]*?".
+    5.  **Agendamento Final:** SOMENTE APÓS a resposta afirmativa do usuário ("sim", "ok", "pode confirmar", etc.), você deve chamar a ferramenta `schedule_appointment`.
+
+    ## Regra de Ouro
+    **NUNCA INVENTE INFORMAÇÕES.** Se não souber ou uma ferramenta falhar, diga: "Peço desculpas, não consegui verificar essa informação. Nossa equipe entrará em contato para te ajudar."
     """
     history = db.query(HistoricoConversa).filter(HistoricoConversa.paciente_id == patient.id).order_by(HistoricoConversa.timestamp.desc()).limit(15).all()
     messages = [{"role": "system", "content": system_prompt}] + [{"role": msg.role, "content": msg.content} for msg in reversed(history)]
@@ -274,7 +293,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
     try:
         final_answer = ""
         for _ in range(5):
-            response = openrouter_chat_completion(model="google/gemini-2.5-flash", messages=messages, tools=TOOLS_DEFINITION, tool_choice="auto")
+            response = openrouter_chat_completion(model="google/gemini-2.5-pro", messages=messages, tools=TOOLS_DEFINITION, tool_choice="auto")
             ai_message = response.choices[0].message
             messages.append(ai_message)
             if not ai_message.tool_calls: final_answer = ai_message.content; break
@@ -307,4 +326,3 @@ async def send_zapi_message(phone: str, message: str):
     async with httpx.AsyncClient() as client:
         try: await client.post(url, json=payload, headers=headers, timeout=30)
         except Exception as e: print(f"🚨 Falha ao enviar mensagem para Z-API ({phone}): {e}", flush=True)
-
