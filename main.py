@@ -1,17 +1,13 @@
 """
-OdontoBot AI – main.py – v16.3.0-Data-Centric-Fix
+OdontoBot AI – main.py – v16.3.1-SyntaxFix
 ────────────────────────────────────────────────────────────────────────────
-• CORREÇÃO FUNDAMENTAL: As ferramentas agora retornam DADOS BRUTOS e
-  estruturados (ex: "NOME: Limpeza | VALOR: R$200"), em vez de frases
-  prontas para o usuário.
-• IA FOCADA EM CONVERSA: O prompt de sistema foi aprimorado para instruir a
-  IA a usar esses dados brutos para FORMULAR uma resposta natural,
-  eliminando a causa raiz das respostas repetitivas.
-• LÓGICA DE SAUDAÇÃO ROBUSTA: O sistema agora detecta se é a primeira
-  mensagem de uma conversa e instrui a IA a se apresentar adequadamente,
-  prevenindo saudações múltiplas.
-• Esta versão foca em uma clara separação de responsabilidades: Ferramentas
-  fornecem dados, a IA constrói a conversa.
+• CORREÇÃO DE SINTAXE (CRÍTICO): Corrigido um `SyntaxError` na função
+  `get_available_slots` causado por uma list comprehension inválida.
+  A lógica foi reescrita para usar um loop `for` padrão, que é mais
+  claro, legível e sintaticamente correto, resolvendo o problema de
+  deploy no Render.
+• As melhorias da v16.3.0 (ferramentas data-centric e IA focada em
+  conversa) são mantidas.
 """
 
 # ───────────────── 1. IMPORTS & SETUP ─────────────
@@ -131,8 +127,6 @@ def get_procedure_list(db: Session) -> str:
     if not procedimentos: return "ERRO: Lista de procedimentos não encontrada."
     categorias = defaultdict(list)
     for p in procedimentos: categorias[p.categoria].append(p.nome)
-    
-    # Retorna os dados, não uma frase pronta
     data_str = "; ".join([f"CATEGORIA: {cat}, PROCEDIMENTOS: {', '.join(nomes)}" for cat, nomes in categorias.items()])
     return f"LISTA_PROCEDIMENTOS: {data_str}"
 
@@ -140,8 +134,6 @@ def get_procedure_details(db: Session, procedure_name: str) -> str:
     """Ferramenta para obter detalhes e preço de um procedimento. Retorna dados estruturados."""
     resultado = db.query(Procedimento).filter(Procedimento.nome.ilike(f"%{procedure_name.strip()}%")).first()
     if not resultado: return f"ERRO: Procedimento '{procedure_name}' não encontrado."
-    
-    # Retorna os dados, não uma frase pronta
     return f"DADOS_PROCEDIMENTO: NOME: {resultado.nome}; DESCRIÇÃO: {resultado.descricao or 'N/A'}; VALOR: {resultado.valor_descritivo}"
 
 def get_available_slots(db: Session, day_str: str) -> str:
@@ -157,7 +149,14 @@ def get_available_slots(db: Session, day_str: str) -> str:
     day_end = target_date.replace(hour=BUSINESS_END_HOUR, minute=0, second=0, microsecond=0)
     booked_slots = {ag.data_hora for ag in db.query(Agendamento.data_hora).filter(Agendamento.data_hora.between(day_start, day_end), Agendamento.status == "confirmado")}
     
-    available_slots = [s.strftime('%H:%M') for s in (day_start + timedelta(minutes=SLOT_DURATION_MINUTES * i) for i in range(int((day_end - day_start).total_seconds() / 60 / SLOT_DURATION_MINUTES))) if (s := day_start + timedelta(minutes=SLOT_DURATION_MINUTES * i)) not in booked_slots and s > get_now()]
+    # <<< INÍCIO DA CORREÇÃO DE SINTAXE >>>
+    available_slots = []
+    num_slots = int((day_end - day_start).total_seconds() / 60 / SLOT_DURATION_MINUTES)
+    for i in range(num_slots):
+        current_slot = day_start + timedelta(minutes=SLOT_DURATION_MINUTES * i)
+        if current_slot not in booked_slots and current_slot > get_now():
+            available_slots.append(current_slot.strftime('%H:%M'))
+    # <<< FIM DA CORREÇÃO DE SINTAXE >>>
 
     if not available_slots: return f"INFO: Sem horários disponíveis para {target_date.strftime('%d/%m/%Y')}."
 
@@ -180,7 +179,6 @@ def schedule_appointment(db: Session, patient_id: int, datetime_str: str, proced
     return f"AGENDAMENTO_SUCESSO: NOME: {patient.primeiro_nome}; PROCEDIMENTO: {procedure}; DATA_HORA: {weekday_name}, {dt_aware.strftime('%d/%m/%Y às %H:%M')}"
 
 def cancel_appointment(db: Session, patient_id: int) -> str:
-    # ... (lógica inalterada, retorno já era data-centric)
     upcoming = db.query(Agendamento).filter(Agendamento.paciente_id == patient_id, Agendamento.status == "confirmado", Agendamento.data_hora > get_now()).order_by(Agendamento.data_hora.asc()).first()
     if not upcoming: return "ERRO: Nenhum agendamento futuro encontrado."
     details = f"{upcoming.procedimento} em {upcoming.data_hora.strftime('%d/%m/%Y às %H:%M')}"
@@ -188,7 +186,6 @@ def cancel_appointment(db: Session, patient_id: int) -> str:
     return f"CANCELAMENTO_SUCESSO: DETALHES: {details}"
 
 def update_patient_info(db: Session, patient_id: int, full_name: str = None, email: str = None, birth_date_str: str = None) -> str:
-    # ... (lógica inalterada, retorno já era data-centric)
     patient = db.query(Paciente).get(patient_id)
     if full_name: patient.nome_completo = full_name; patient.primeiro_nome = full_name.split(' ')[0]
     if email:
@@ -202,14 +199,13 @@ def update_patient_info(db: Session, patient_id: int, full_name: str = None, ema
     return check_onboarding_status(db, patient_id)
 
 def check_onboarding_status(db: Session, patient_id: int) -> str:
-    # ... (lógica inalterada, retorno já era data-centric)
     patient = db.query(Paciente).get(patient_id)
     missing_info = [field for field, value in [("nome_completo", patient.nome_completo), ("email", patient.email), ("data_nascimento", patient.data_nascimento)] if not value]
     if not missing_info: return "STATUS: CADASTRO_COMPLETO"
     return f"STATUS: CADASTRO_INCOMPLETO; FALTANDO: {', '.join(missing_info)}"
 
 # ───────────────── 7. APP & WEBHOOK SETUP ─────────────
-app = FastAPI(title="OdontoBot AI", version="16.3.0-Data-Centric-Fix")
+app = FastAPI(title="OdontoBot AI", version="16.3.1-SyntaxFix")
 
 @app.on_event("startup")
 def startup_event():
@@ -224,7 +220,7 @@ def health_check_head(): return Response(status_code=200)
 class ZapiPayload(BaseModel): phone: str; text: Optional[Dict] = None; audio: Optional[Dict] = None
 
 AVAILABLE_TOOLS = {"get_procedure_list": get_procedure_list, "get_procedure_details": get_procedure_details, "get_available_slots": get_available_slots, "schedule_appointment": schedule_appointment, "cancel_appointment": cancel_appointment, "update_patient_info": update_patient_info, "check_onboarding_status": check_onboarding_status}
-TOOLS_DEFINITION = [ # Definições atualizadas para refletir a nova abordagem
+TOOLS_DEFINITION = [
     {"type": "function", "function": {"name": "get_procedure_list", "description": "Para listar os serviços/tratamentos da clínica."}},
     {"type": "function", "function": {"name": "get_procedure_details", "description": "Para obter detalhes e preço de um procedimento específico.", "parameters": {"type": "object", "properties": {"procedure_name": {"type": "string"}}, "required": ["procedure_name"]}}},
     {"type": "function", "function": {"name": "get_available_slots", "description": "Para verificar horários disponíveis em uma data.", "parameters": {"type": "object", "properties": {"day_str": {"type": "string"}}, "required": ["day_str"]}}},
