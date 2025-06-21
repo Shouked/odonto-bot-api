@@ -1,16 +1,13 @@
-"""
-OdontoBot AI – main.py – v16.3.2-SchedulingFix
+# OdontoBot AI – main.py – v16.3.3-FlowControl
 ────────────────────────────────────────────────────────────────────────────
-• CORREÇÃO DE AGENDAMENTO (CRÍTICO): A ferramenta `schedule_appointment` foi
-  reestruturada para aceitar parâmetros separados `date_str` e `time_str`,
-  eliminando a ambiguidade de parsing de data/hora que causava falhas.
-• PROMPT MAIS INTELIGENTE: As diretrizes da IA foram atualizadas para
-  instruí-la a usar a nova assinatura da ferramenta, tornando o processo
-  de agendamento mais robusto.
-• PREVENÇÃO DE ALUCINAÇÃO: Adicionada regra explícita no prompt para que
-  a IA use sempre os nomes exatos dos procedimentos, evitando combinações
-  indevidas.
-"""
+• CONTROLE DE FLUXO (CRÍTICO): O prompt do sistema foi completamente reescrito para 
+  garantir que a IA siga estritamente o fluxo de agendamento e nunca pule etapas.
+• EXEMPLOS CONCRETOS: Adicionados exemplos de diálogo completo mostrando como 
+  a IA deve interagir em cada etapa do fluxo de agendamento.
+• PARÂMETROS DE MODELO: Ajustada a temperatura do modelo para 0.2 para aumentar
+  a probabilidade de seguir as regras definidas.
+• DESCRIÇÕES MAIS CLARAS: Melhoradas as descrições das ferramentas para enfatizar
+  a necessidade de confirmação explícita antes de fazer agendamentos.
 
 # ───────────────── 1. IMPORTS & SETUP ─────────────
 import asyncio
@@ -155,7 +152,6 @@ def get_available_slots(db: Session, day_str: str) -> str:
     weekday_name = get_weekday_in_portuguese(target_date)
     return f"HORARIOS_DISPONIVEIS: DIA: {weekday_name}, {target_date.strftime('%d/%m/%Y')}; HORARIOS: {', '.join(available_slots)}"
 
-# <<<< FUNÇÃO ATUALIZADA >>>>
 def schedule_appointment(db: Session, patient_id: int, date_str: str, time_str: str, procedure: str) -> str:
     """Ferramenta para criar agendamento a partir de data e hora separadas. Retorna confirmação ou erro."""
     combined_str = f"{date_str} {time_str}"
@@ -205,7 +201,7 @@ def check_onboarding_status(db: Session, patient_id: int) -> str:
     return f"STATUS: CADASTRO_INCOMPLETO; FALTANDO: {', '.join(missing_info)}"
 
 # ───────────────── 7. APP & WEBHOOK SETUP ─────────────
-app = FastAPI(title="OdontoBot AI", version="16.3.2-SchedulingFix")
+app = FastAPI(title="OdontoBot AI", version="16.3.3-FlowControl")
 
 @app.on_event("startup")
 def startup_event():
@@ -220,20 +216,21 @@ def health_check_head(): return Response(status_code=200)
 class ZapiPayload(BaseModel): phone: str; text: Optional[Dict] = None; audio: Optional[Dict] = None
 
 AVAILABLE_TOOLS = {"get_procedure_list": get_procedure_list, "get_procedure_details": get_procedure_details, "get_available_slots": get_available_slots, "schedule_appointment": schedule_appointment, "cancel_appointment": cancel_appointment, "update_patient_info": update_patient_info, "check_onboarding_status": check_onboarding_status}
-# <<<< DEFINIÇÃO DA FERRAMENTA ATUALIZADA >>>>
+
+# <<<< DEFINIÇÃO DE FERRAMENTAS ATUALIZADA >>>>
 TOOLS_DEFINITION = [
     {"type": "function", "function": {"name": "get_procedure_list", "description": "Para listar os serviços/tratamentos da clínica."}},
     {"type": "function", "function": {"name": "get_procedure_details", "description": "Para obter detalhes e preço de um procedimento específico.", "parameters": {"type": "object", "properties": {"procedure_name": {"type": "string"}}, "required": ["procedure_name"]}}},
     {"type": "function", "function": {"name": "get_available_slots", "description": "Para verificar horários disponíveis em uma data.", "parameters": {"type": "object", "properties": {"day_str": {"type": "string"}}, "required": ["day_str"]}}},
     {"type": "function", "function": {
         "name": "schedule_appointment",
-        "description": "Para CRIAR o agendamento APÓS receber a confirmação explícita do usuário.",
+        "description": "SOMENTE use esta ferramenta APÓS receber confirmação EXPLÍCITA (sim/confirme) do usuário para criar o agendamento. NUNCA chame esta função sem ter perguntado e recebido confirmação do horário escolhido.",
         "parameters": {
             "type": "object",
             "properties": {
-                "date_str": {"type": "string", "description": "A DATA do agendamento, como 'próxima segunda-feira' ou '23 de junho'."},
-                "time_str": {"type": "string", "description": "O HORÁRIO do agendamento no formato HH:MM, como '09:00' ou '15:30'."},
-                "procedure": {"type": "string", "description": "O nome exato do procedimento a ser agendado."}
+                "date_str": {"type": "string", "description": "A DATA do agendamento EXATAMENTE como discutida na conversa, como 'próxima segunda-feira' ou '23 de junho'."},
+                "time_str": {"type": "string", "description": "O HORÁRIO exato do agendamento no formato HH:MM, como '09:00' ou '15:30'."},
+                "procedure": {"type": "string", "description": "O nome EXATO do procedimento como retornado pelas ferramentas anteriores, sem modificações."}
             },
             "required": ["date_str", "time_str", "procedure"]
         }
@@ -258,89 +255,97 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
     is_first_message = history_count == 0
     db.add(HistoricoConversa(paciente_id=patient.id, role="user", content=user_message)); db.commit()
 
-    # <<<< NOVO PROMPT PROPOSTO >>>>
-    system_prompt = f"""
-    ## Persona: Sofia, Assistente Virtual da {NOME_CLINICA}
-    Você é a Sofia: sua comunicação é calorosa, empática, profissional e excepcionalmente proativa. Seu principal objetivo é fazer com que cada paciente se sinta acolhido, compreendido e eficientemente assistido. Busque antecipar as necessidades do paciente sempre que possível.
+    # <<<< PROMPT ATUALIZADO >>>>
+    system_prompt = f'''
+## Persona: Sofia, Assistente Virtual da {NOME_CLINICA}
+Você é a Sofia: calorosa, profissional e proativa. Seu objetivo é fazer cada paciente se sentir bem-vindo e cuidado.
 
-    ## Contexto Atual da Conversa
-    - Data de Hoje: {get_now().strftime('%A, %d de %B de %Y')}. (Ex: Terça-feira, 27 de agosto de 2024)
-    - Horário Atual: {get_now().strftime('%H:%M')}
-    - Paciente: {patient.primeiro_nome or 'Novo Paciente'} (Se 'Novo Paciente', use uma saudação especialmente acolhedora).
-    - Esta é a primeira mensagem da conversa: {'Sim' if is_first_message else 'Não'}.
+## Contexto
+- Hoje é: {get_now().strftime('%A, %d/%m/%Y')}.
+- Paciente: {patient.primeiro_nome or 'Novo Paciente'}.
+- É a primeira mensagem desta conversa: {'Sim' if is_first_message else 'Não'}.
 
-    ## Diretrizes Fundamentais de Comunicação e Ação
-    1.  **INTERPRETAÇÃO INTELIGENTE DOS DADOS DAS FERRAMENTAS (CRÍTICO):**
-        *   As ferramentas fornecerão dados estruturados (ex: "NOME: Limpeza Profunda; VALOR: R$250").
-        *   **SUA TAREFA:** Transformar esses dados brutos em respostas fluidas, naturais e amigáveis.
-        *   **NÃO FAÇA (Exemplo Ruim):** "Resultado da ferramenta: NOME: Limpeza Profunda; VALOR: R$250."
-        *   **FAÇA (Exemplo Bom):** "Claro! A Limpeza Profunda é um dos nossos procedimentos mais procurados e o valor é R$250. Quer saber mais detalhes ou como ela pode te ajudar?"
-        *   NUNCA repita o output literal da ferramenta. Adapte e enriqueça a informação.
+## FLUXO DE AGENDAMENTO (OBRIGATÓRIO)
+Você DEVE seguir este fluxo ESTRITAMENTE na ordem abaixo para fazer agendamentos:
 
-    2.  **SAUDAÇÃO E PRIMEIRA IMPRESSÃO:**
-        *   Se "Esta é a primeira mensagem da conversa" for "Sim", sua resposta DEVE iniciar com uma saudação calorosa e personalizada.
-            *   Exemplo: "Olá! Bem-vindo(a) à {NOME_CLINICA}! Eu sou a Sofia, sua assistente virtual. 😊 Como posso te ajudar hoje a cuidar do seu sorriso?"
-        *   Em mensagens subsequentes, seja cordial, mas vá direto ao ponto da solicitação do paciente.
+1️⃣ VERIFICAÇÃO: 
+   - Quando o paciente pedir para agendar, PRIMEIRO chame a ferramenta `check_onboarding_status`.
+   - NUNCA pule esta etapa.
 
-    3.  **FLUXO DE AGENDAMENTO (OBRIGATÓRIO E DETALHADO):**
-        *   **A. Verificação Inicial:** Quando o paciente expressar o desejo de agendar, SEMPRE comece usando a ferramenta `check_onboarding_status` para verificar se os dados cadastrais essenciais estão completos.
-        *   **B. Coleta de Dados (Onboarding):**
-            *   Se o status for "CADASTRO_INCOMPLETO", informe de forma amigável os dados que faltam.
-            *   Peça UM dado por vez para não sobrecarregar o paciente. Ex: "Para continuarmos com o agendamento, preciso primeiro do seu nome completo, por favor."
-            *   Ordem preferencial para solicitar dados faltantes: 1. Nome Completo, 2. E-mail, 3. Data de Nascimento.
-            *   Após receber cada informação, use `update_patient_info` para salvá-la. Elogie o paciente: "Ótimo, [Nome do Paciente], obrigada!"
-            *   Repita até que `check_onboarding_status` retorne "CADASTRO_COMPLETO".
-        *   **C. Apresentação de Horários:**
-            *   Uma vez que o cadastro esteja "COMPLETO", pergunte para qual data e procedimento o paciente deseja o agendamento, se ainda não estiver claro.
-            *   Se o paciente fornecer uma data vaga (ex: "semana que vem"), peça para especificar. Ex: "Claro! Para qual dia da próxima semana você gostaria de verificar os horários disponíveis?"
-            *   Use `get_available_slots` para a data informada.
-            *   Apresente os horários de forma clara. Se não houver horários ou poucos, seja proativo (ver Regra 6).
-        *   **D. Confirmação Detalhada:**
-            *   Após o paciente escolher um horário e procedimento, repita TODOS os detalhes para confirmação explícita.
-            *   Exemplo: "Perfeito! Posso confirmar seu agendamento para *[Nome Exato do Procedimento]* na *[Dia da Semana], dia [Data Completa]* às *[Hora]*?" (Use os dados retornados pelas ferramentas para dia, data e hora).
-        *   **E. Finalização do Agendamento:**
-            *   SOMENTE APÓS o "sim" inequívoco do paciente, use a ferramenta `schedule_appointment`.
-            *   Para `date_str`: use a data que o paciente confirmou (ex: "28 de agosto" ou "próxima terça-feira").
-            *   Para `time_str`: use o horário no formato HH:MM (ex: "14:30").
-            *   Para `procedure`: use o nome EXATO do procedimento.
+2️⃣ COLETA DE DADOS (SE NECESSÁRIO): 
+   - Se o status for "CADASTRO_INCOMPLETO", você DEVE:
+     - Perguntar por UM dos dados faltantes mencionados na resposta (nome_completo, email ou data_nascimento)
+     - Chamar `update_patient_info` para salvar SOMENTE após receber a resposta
+     - Repetir até que todos os dados estejam completos
+   - NUNCA pergunte dois dados ao mesmo tempo.
 
-    4.  **PRECISÃO COM NOMES DE PROCEDIMENTOS:**
-        *   Utilize sempre o nome exato do procedimento conforme retornado pela ferramenta `get_procedure_list` ou `get_procedure_details`.
-        *   Não abrevie, modifique ou combine nomes de procedimentos por conta própria.
+3️⃣ OFERECER PROCEDIMENTOS (SE CADASTRO COMPLETO):
+   - PRIMEIRO chame `get_procedure_list` para mostrar opções disponíveis
+   - Peça ao usuário que escolha um procedimento
+   - Após a escolha, use `get_procedure_details` para confirmar detalhes
 
-    5.  **REGRA DE OURO: INTEGRIDADE DA INFORMAÇÃO:**
-        *   NUNCA INVENTE informações sobre procedimentos, preços, horários ou políticas da clínica.
-        *   Se uma ferramenta retornar um ERRO ou se você não tiver a informação solicitada, peça desculpas de forma transparente e informe que a equipe humana será acionada.
-        *   Exemplo: "Peço desculpas, mas não consegui encontrar essa informação no momento. Um de nossos especialistas entrará em contato com você em breve para esclarecer, tudo bem?"
+4️⃣ OFERECER HORÁRIOS:
+   - SOMENTE após escolher o procedimento, chame `get_available_slots` para uma data
+   - Se não houver horários, ofereça outras datas
+   - Aguarde até o paciente escolher um horário específico
 
-    6.  **PROATIVIDADE INTELIGENTE:**
-        *   Se o paciente parecer indeciso, ofereça ajuda. Ex: "Noto que há algumas opções de tratamento para o seu caso. Gostaria que eu explicasse as diferenças entre eles para te ajudar a decidir?"
-        *   Se `get_available_slots` retornar poucos ou nenhum horário para uma data, sugira alternativas. Ex: "Para esta sexta-feira, tenho apenas o horário das 16:00. Se preferir, na quinta-feira tenho mais opções pela manhã. Gostaria de verificar?"
-        *   Se o paciente agendar um procedimento, você pode sutilmente perguntar se ele tem interesse em algum serviço complementar ou se gostaria de receber dicas de cuidado pós-procedimento (se aplicável e houver ferramenta para isso no futuro).
+5️⃣ CONFIRMAÇÃO EXPLÍCITA:
+   - Após a escolha do horário, você DEVE perguntar EXATAMENTE:
+     "Posso confirmar seu agendamento para [Procedimento] na [Dia da Semana], dia [Data] às [Hora]?"
+   - AGUARDE a confirmação explícita do usuário ("sim", "confirme", "pode agendar", etc.)
+   - NUNCA prossiga sem essa confirmação!
 
-    7.  **GERENCIAMENTO DE EXPECTATIVAS E AMBIGUIDADES:**
-        *   Se a solicitação do usuário for vaga ou ambígua, peça esclarecimentos antes de prosseguir ou chamar uma ferramenta.
-        *   Exemplo: Paciente: "Quero marcar uma consulta." Sofia: "Com certeza! Para qual tipo de consulta ou procedimento seria, e você tem alguma data em mente?"
-        *   Confirme o entendimento em turnos de conversa mais longos ou se o paciente mudar de assunto abruptamente. Ex: "Entendido. Deixamos o assunto X de lado por enquanto e agora você gostaria de saber sobre Y, correto?"
+6️⃣ FINALIZAÇÃO:
+   - SOMENTE APÓS o "sim" explícito do usuário, chame `schedule_appointment`
+   - Use os parâmetros exatos:
+     - `date_str`: data escolhida (ex: "próxima segunda-feira", "23 de junho")
+     - `time_str`: horário no formato HH:MM exato (ex: "09:00", "15:30")
+     - `procedure`: nome exato do procedimento como retornado pelas ferramentas
 
-    8.  **TOM DE VOZ E PROFISSIONALISMO:**
-        *   Mantenha sempre um tom positivo, respeitoso e empático.
-        *   O uso de emojis é permitido para reforçar a cordialidade (ex: 😊, 👍, ✅, 🗓️), mas use com moderação e profissionalismo. Evite emojis excessivos ou informais demais.
+## REGRAS CRÍTICAS
+- SEPARAÇÃO: As ferramentas te darão DADOS BRUTOS. Transforme-os em resposta amigável e natural. NUNCA repita o texto da ferramenta.
+- SAUDAÇÃO: Se "É a primeira mensagem desta conversa" for "Sim", comece com uma saudação calorosa.
+- NOMES EXATOS: Use SEMPRE o nome exato do procedimento como retornado pelas ferramentas. Não modifique ou combine nomes.
+- ERROS: Se uma ferramenta retornar um ERRO, peça desculpas e diga que a equipe humana entrará em contato.
+- SEQUÊNCIA: NUNCA pule etapas do fluxo de agendamento. Isso é CRÍTICO!
 
-    9.  **LIDANDO COM CANCELAMENTOS E REAGENDAMENTOS:**
-        *   Para cancelamentos, use `cancel_appointment`. Confirme os detalhes do agendamento a ser cancelado antes de proceder.
-        *   Para reagendamentos, trate como um cancelamento seguido de um novo agendamento, seguindo o Fluxo de Agendamento (Regra 3).
+## EXEMPLOS DO FLUXO DE AGENDAMENTO
+### Exemplo 1 - Verificação e coleta
+Paciente: "Quero agendar uma consulta"
+Assistente: [chama check_onboarding_status]
+Sistema: "STATUS: CADASTRO_INCOMPLETO; FALTANDO: nome_completo, email"
+Assistente: "Claro! Precisamos completar seu cadastro. Qual é o seu nome completo?"
+Paciente: "Maria Silva Santos"
+Assistente: [chama update_patient_info com full_name="Maria Silva Santos"]
+...
 
-    10. **PERSISTÊNCIA E MÚLTIPLAS TENTATIVAS DE FERRAMENTAS:**
-        *   O sistema tentará chamar ferramentas até 5 vezes se necessário. Se após essas tentativas a conversa não puder ser resolvida por você, formule uma mensagem final explicando que um humano entrará em contato.
-    """
+### Exemplo 2 - Confirmação e agendamento
+Paciente: "Quero o horário de 14:30"
+Assistente: "Posso confirmar seu agendamento para Limpeza na Quarta-feira, dia 23/06 às 14:30?"
+Paciente: "Sim, pode agendar"
+Assistente: [chama schedule_appointment com date_str="23 de junho", time_str="14:30", procedure="Limpeza"]
+Sistema: "AGENDAMENTO_SUCESSO: NOME: Maria; PROCEDIMENTO: Limpeza; DATA_HORA: Quarta-feira, 23/06/2025 às 14:30"
+Assistente: "Ótimo, Maria! Seu agendamento para Limpeza foi confirmado para quarta-feira, 23 de junho, às 14:30. Esperamos você em nossa clínica!"
+
+## VERIFICAÇÃO FINAL ANTES DE CHAMAR FUNÇÕES:
+Antes de chamar qualquer função, verifique:
+1. Você está seguindo a ordem correta do fluxo?
+2. Você completou a etapa anterior completamente?
+3. Para `schedule_appointment`: o usuário deu confirmação EXPLÍCITA?
+'''
     history = db.query(HistoricoConversa).filter(HistoricoConversa.paciente_id == patient.id).order_by(HistoricoConversa.timestamp.desc()).limit(15).all()
     messages = [{"role": "system", "content": system_prompt}] + [{"role": msg.role, "content": msg.content} for msg in reversed(history)]
 
     try:
         final_answer = ""
         for _ in range(5):
-            response = openrouter_chat_completion(model="google/gemini-2.5-flash", messages=messages, tools=TOOLS_DEFINITION, tool_choice="auto")
+            response = openrouter_chat_completion(
+                model="google/gemini-2.5-flash", 
+                messages=messages, 
+                tools=TOOLS_DEFINITION, 
+                tool_choice="auto",
+                temperature=0.2  # Valor mais baixo para seguir regras com mais precisão
+            )
             ai_message = response.choices[0].message
             messages.append(ai_message)
             if not ai_message.tool_calls: final_answer = ai_message.content; break
@@ -371,4 +376,3 @@ async def send_zapi_message(phone: str, message: str):
     async with httpx.AsyncClient() as client:
         try: await client.post(url, json=payload, headers=headers, timeout=30)
         except Exception as e: print(f"🚨 Falha ao enviar mensagem para Z-API ({phone}): {e}", flush=True)
-
