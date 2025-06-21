@@ -296,7 +296,7 @@ Siga os fluxos abaixo ESTRITAMENTE.
     try:
         final_answer = ""
         # Usando Claude 3 Haiku para melhor seguimento de regras
-        response_model = "anthropic/claude-3-haiku-20240307"
+        response_model = "google/gemini-2.5-pro"
 
         for _ in range(5):
             response = openrouter_chat_completion(model=response_model, messages=messages, tools=TOOLS_DEFINITION, tool_choice="auto", temperature=0.1)
