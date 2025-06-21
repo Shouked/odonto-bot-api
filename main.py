@@ -1,5 +1,18 @@
-# OdontoBot AI – main.py – v16.3.3-FlowControl
-# ────────────────────────────────────────────────────────────────────────────
+"""
+OdontoBot AI – main.py – v17.0.0-Final-TuneUp
+────────────────────────────────────────────────────────────────────────────
+• NOVA FERRAMENTA CRÍTICA: Adicionada a função `get_my_appointment_details`
+  para permitir que a IA consulte os agendamentos existentes do paciente,
+  resolvendo uma falha fundamental no fluxo.
+• CORREÇÃO GLOBAL DE FUSO HORÁRIO: Todas as ferramentas que retornam
+  datas/horas agora convertem explicitamente para o fuso horário de São
+  Paulo (BR_TIMEZONE) antes de formatar a saída, garantindo que a IA
+  sempre receba e exiba a hora local correta, eliminando o problema do UTC.
+• PROMPT DE SISTEMA REFINADO: O prompt foi reestruturado com seções
+  de "Fluxos de Trabalho" para guiar a IA de forma mais clara.
+• MODELO DE IA: Alterado para Claude 3 Haiku para melhor seguimento de
+  instruções complexas e manutenção de persona.
+"""
 
 # ───────────────── 1. IMPORTS & SETUP ─────────────
 import asyncio
@@ -111,7 +124,26 @@ def get_weekday_in_portuguese(date_obj: datetime) -> str:
     weekdays = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado", "Domingo"]
     return weekdays[date_obj.weekday()]
 
-# ───────────────── 6. TOOL FUNCTIONS (Data-Centric Architecture) ─────────────
+# ───────────────── 6. TOOL FUNCTIONS (Data-Centric & Timezone-Aware) ─────────────
+
+# <<<< NOVA FERRAMENTA >>>>
+def get_my_appointment_details(db: Session, patient_id: int) -> str:
+    """Ferramenta para consultar os detalhes do próximo agendamento do paciente."""
+    upcoming_appointment = db.query(Agendamento).filter(
+        Agendamento.paciente_id == patient_id,
+        Agendamento.status == 'confirmado',
+        Agendamento.data_hora > get_now()
+    ).order_by(Agendamento.data_hora.asc()).first()
+
+    if not upcoming_appointment:
+        return "INFO: Nenhum agendamento futuro encontrado."
+
+    # <<<< CORREÇÃO DE TIMEZONE >>>>
+    local_time = upcoming_appointment.data_hora.astimezone(BR_TIMEZONE)
+    weekday_name = get_weekday_in_portuguese(local_time)
+    
+    return f"DADOS_AGENDAMENTO: PROCEDIMENTO: {upcoming_appointment.procedimento}; DATA_HORA: {weekday_name}, {local_time.strftime('%d/%m/%Y às %H:%M')}"
+
 def get_procedure_list(db: Session) -> str:
     procedimentos = db.query(Procedimento).order_by(Procedimento.categoria, Procedimento.nome).all()
     if not procedimentos: return "ERRO: Lista de procedimentos não encontrada."
@@ -145,31 +177,25 @@ def get_available_slots(db: Session, day_str: str) -> str:
     return f"HORARIOS_DISPONIVEIS: DIA: {weekday_name}, {target_date.strftime('%d/%m/%Y')}; HORARIOS: {', '.join(available_slots)}"
 
 def schedule_appointment(db: Session, patient_id: int, date_str: str, time_str: str, procedure: str) -> str:
-    """Ferramenta para criar agendamento a partir de data e hora separadas. Retorna confirmação ou erro."""
     combined_str = f"{date_str} {time_str}"
-    # Tenta um parsing mais estrito primeiro
-    parsed_datetime = parse_date(combined_str, languages=['pt'], settings={"PREFER_DATES_FROM": "future", "STRICT_PARSING": True})
-    if not parsed_datetime:
-        # Fallback para parsing mais flexível
-        parsed_datetime = parse_date(combined_str, languages=['pt'], settings={"PREFER_DATES_FROM": "future"})
-        if not parsed_datetime:
-            return f"ERRO: Data e hora inválidas a partir de '{combined_str}'."
-
+    parsed_datetime = parse_date(combined_str, languages=['pt'], settings={"PREFER_DATES_FROM": "future"})
+    if not parsed_datetime: return f"ERRO: Data e hora inválidas a partir de '{combined_str}'."
     dt_aware = parsed_datetime.astimezone(BR_TIMEZONE)
     if not (time(BUSINESS_START_HOUR) <= dt_aware.time() < time(BUSINESS_END_HOUR)): return "ERRO: Fora do horário comercial."
     if db.query(Agendamento).filter_by(data_hora=dt_aware, status="confirmado").first(): return "ERRO: Horário recém-agendado."
-    
     patient = db.query(Paciente).get(patient_id)
     new_appointment = Agendamento(paciente_id=patient_id, data_hora=dt_aware, procedimento=procedure)
     db.add(new_appointment); db.commit()
-    
-    weekday_name = get_weekday_in_portuguese(dt_aware)
-    return f"AGENDAMENTO_SUCESSO: NOME: {patient.primeiro_nome}; PROCEDIMENTO: {procedure}; DATA_HORA: {weekday_name}, {dt_aware.strftime('%d/%m/%Y às %H:%M')}"
+    local_time = new_appointment.data_hora.astimezone(BR_TIMEZONE)
+    weekday_name = get_weekday_in_portuguese(local_time)
+    return f"AGENDAMENTO_SUCESSO: NOME: {patient.primeiro_nome}; PROCEDIMENTO: {procedure}; DATA_HORA: {weekday_name}, {local_time.strftime('%d/%m/%Y às %H:%M')}"
 
 def cancel_appointment(db: Session, patient_id: int) -> str:
     upcoming = db.query(Agendamento).filter(Agendamento.paciente_id == patient_id, Agendamento.status == "confirmado", Agendamento.data_hora > get_now()).order_by(Agendamento.data_hora.asc()).first()
     if not upcoming: return "ERRO: Nenhum agendamento futuro encontrado."
-    details = f"{upcoming.procedimento} em {upcoming.data_hora.strftime('%d/%m/%Y às %H:%M')}"
+    # <<<< CORREÇÃO DE TIMEZONE >>>>
+    local_time = upcoming.data_hora.astimezone(BR_TIMEZONE)
+    details = f"{upcoming.procedimento} em {local_time.strftime('%d/%m/%Y às %H:%M')}"
     upcoming.status = "cancelado"; db.commit()
     return f"CANCELAMENTO_SUCESSO: DETALHES: {details}"
 
@@ -193,7 +219,7 @@ def check_onboarding_status(db: Session, patient_id: int) -> str:
     return f"STATUS: CADASTRO_INCOMPLETO; FALTANDO: {', '.join(missing_info)}"
 
 # ───────────────── 7. APP & WEBHOOK SETUP ─────────────
-app = FastAPI(title="OdontoBot AI", version="16.3.3-FlowControl")
+app = FastAPI(title="OdontoBot AI", version="17.0.0-Final-TuneUp")
 
 @app.on_event("startup")
 def startup_event():
@@ -207,26 +233,14 @@ def health_check_head(): return Response(status_code=200)
 
 class ZapiPayload(BaseModel): phone: str; text: Optional[Dict] = None; audio: Optional[Dict] = None
 
-AVAILABLE_TOOLS = {"get_procedure_list": get_procedure_list, "get_procedure_details": get_procedure_details, "get_available_slots": get_available_slots, "schedule_appointment": schedule_appointment, "cancel_appointment": cancel_appointment, "update_patient_info": update_patient_info, "check_onboarding_status": check_onboarding_status}
-
-# <<<< DEFINIÇÃO DE FERRAMENTAS ATUALIZADA >>>>
+# <<<< LISTA DE FERRAMENTAS ATUALIZADA >>>>
+AVAILABLE_TOOLS = {"get_my_appointment_details": get_my_appointment_details, "get_procedure_list": get_procedure_list, "get_procedure_details": get_procedure_details, "get_available_slots": get_available_slots, "schedule_appointment": schedule_appointment, "cancel_appointment": cancel_appointment, "update_patient_info": update_patient_info, "check_onboarding_status": check_onboarding_status}
 TOOLS_DEFINITION = [
+    {"type": "function", "function": {"name": "get_my_appointment_details", "description": "Para consultar os detalhes de um agendamento JÁ EXISTENTE do paciente. Use quando o usuário perguntar 'qual meu horário?', 'quando é minha consulta?', etc."}},
     {"type": "function", "function": {"name": "get_procedure_list", "description": "Para listar os serviços/tratamentos da clínica."}},
     {"type": "function", "function": {"name": "get_procedure_details", "description": "Para obter detalhes e preço de um procedimento específico.", "parameters": {"type": "object", "properties": {"procedure_name": {"type": "string"}}, "required": ["procedure_name"]}}},
     {"type": "function", "function": {"name": "get_available_slots", "description": "Para verificar horários disponíveis em uma data.", "parameters": {"type": "object", "properties": {"day_str": {"type": "string"}}, "required": ["day_str"]}}},
-    {"type": "function", "function": {
-        "name": "schedule_appointment",
-        "description": "SOMENTE use esta ferramenta APÓS receber confirmação EXPLÍCITA (sim/confirme) do usuário para criar o agendamento. NUNCA chame esta função sem ter perguntado e recebido confirmação do horário escolhido.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "date_str": {"type": "string", "description": "A DATA do agendamento EXATAMENTE como discutida na conversa, como 'próxima segunda-feira' ou '23 de junho'."},
-                "time_str": {"type": "string", "description": "O HORÁRIO exato do agendamento no formato HH:MM, como '09:00' ou '15:30'."},
-                "procedure": {"type": "string", "description": "O nome EXATO do procedimento como retornado pelas ferramentas anteriores, sem modificações."}
-            },
-            "required": ["date_str", "time_str", "procedure"]
-        }
-    }},
+    {"type": "function", "function": {"name": "schedule_appointment", "description": "Para CRIAR um agendamento APÓS receber a confirmação explícita do usuário.", "parameters": {"type": "object", "properties": {"date_str": {"type": "string"}, "time_str": {"type": "string"}, "procedure": {"type": "string"}}, "required": ["date_str", "time_str", "procedure"]}}},
     {"type": "function", "function": {"name": "cancel_appointment", "description": "Para cancelar um agendamento."}},
     {"type": "function", "function": {"name": "update_patient_info", "description": "Para salvar dados pessoais do paciente.", "parameters": {"type": "object", "properties": {"full_name": {"type": "string"}, "email": {"type": "string"}, "birth_date_str": {"type": "string"}}}} },
     {"type": "function", "function": {"name": "check_onboarding_status", "description": "PARA USO INTERNO: Use ANTES de agendar para verificar se o cadastro está completo."}}
@@ -240,7 +254,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
     user_phone, user_message = payload.phone, ""
     if payload.audio and payload.audio.get('audioUrl'): user_message = await transcribe_audio_whisper(payload.audio['audioUrl'])
     elif payload.text and payload.text.get('message'): user_message = payload.text['message']
-    if not user_message: await send_zapi_message(user_phone, f"Olá! Sou a Sofia, da {NOME_CLINICA}. Como posso te ajudar?"); return {"status": "greeting"}
+    if not user_message.strip(): await send_zapi_message(user_phone, f"Olá! Sou a Sofia, assistente da {NOME_CLINICA}. Como posso te ajudar?"); return {"status": "greeting"}
 
     patient = find_or_create_patient(db, user_phone)
     history_count = db.query(HistoricoConversa).filter(HistoricoConversa.paciente_id == patient.id).count()
@@ -248,7 +262,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
     db.add(HistoricoConversa(paciente_id=patient.id, role="user", content=user_message)); db.commit()
 
     # <<<< PROMPT ATUALIZADO >>>>
-    system_prompt = f'''
+    system_prompt = f"""
 ## Persona: Sofia, Assistente Virtual da {NOME_CLINICA}
 Você é a Sofia: calorosa, profissional e proativa. Seu objetivo é fazer cada paciente se sentir bem-vindo e cuidado.
 
@@ -257,87 +271,35 @@ Você é a Sofia: calorosa, profissional e proativa. Seu objetivo é fazer cada 
 - Paciente: {patient.primeiro_nome or 'Novo Paciente'}.
 - É a primeira mensagem desta conversa: {'Sim' if is_first_message else 'Não'}.
 
-## FLUXO DE AGENDAMENTO (OBRIGATÓRIO)
-Você DEVE seguir este fluxo ESTRITAMENTE na ordem abaixo para fazer agendamentos:
+## PRINCIPAIS FLUXOS DE TRABALHO
+Siga os fluxos abaixo ESTRITAMENTE.
 
-1️⃣ VERIFICAÇÃO: 
-   - Quando o paciente pedir para agendar, PRIMEIRO chame a ferramenta `check_onboarding_status`.
-   - NUNCA pule esta etapa.
+### Fluxo de Consulta de Agendamento
+1. Se o paciente perguntar sobre seu agendamento existente (ex: "quando é minha consulta?", "qual meu horário?"), chame a ferramenta `get_my_appointment_details`.
+2. Transforme o resultado em uma resposta clara para o paciente.
 
-2️⃣ COLETA DE DADOS (SE NECESSÁRIO): 
-   - Se o status for "CADASTRO_INCOMPLETO", você DEVE:
-     - Perguntar por UM dos dados faltantes mencionados na resposta (nome_completo, email ou data_nascimento)
-     - Chamar `update_patient_info` para salvar SOMENTE após receber a resposta
-     - Repetir até que todos os dados estejam completos
-   - NUNCA pergunte dois dados ao mesmo tempo.
-
-3️⃣ OFERECER PROCEDIMENTOS (SE CADASTRO COMPLETO):
-   - PRIMEIRO chame `get_procedure_list` para mostrar opções disponíveis
-   - Peça ao usuário que escolha um procedimento
-   - Após a escolha, use `get_procedure_details` para confirmar detalhes
-
-4️⃣ OFERECER HORÁRIOS:
-   - SOMENTE após escolher o procedimento, chame `get_available_slots` para uma data
-   - Se não houver horários, ofereça outras datas
-   - Aguarde até o paciente escolher um horário específico
-
-5️⃣ CONFIRMAÇÃO EXPLÍCITA:
-   - Após a escolha do horário, você DEVE perguntar EXATAMENTE:
-     "Posso confirmar seu agendamento para [Procedimento] na [Dia da Semana], dia [Data] às [Hora]?"
-   - AGUARDE a confirmação explícita do usuário ("sim", "confirme", "pode agendar", etc.)
-   - NUNCA prossiga sem essa confirmação!
-
-6️⃣ FINALIZAÇÃO:
-   - SOMENTE APÓS o "sim" explícito do usuário, chame `schedule_appointment`
-   - Use os parâmetros exatos:
-     - `date_str`: data escolhida (ex: "próxima segunda-feira", "23 de junho")
-     - `time_str`: horário no formato HH:MM exato (ex: "09:00", "15:30")
-     - `procedure`: nome exato do procedimento como retornado pelas ferramentas
+### Fluxo de Agendamento (NOVO AGENDAMENTO)
+1.  **Verificação:** Ao pedir para agendar, PRIMEIRO chame `check_onboarding_status`.
+2.  **Coleta:** Se "INCOMPLETO", peça UM dado faltante. Use `update_patient_info` para salvar. Repita até o cadastro estar completo.
+3.  **Opções:** Com o cadastro completo, use `get_available_slots` para mostrar os horários.
+4.  **Confirmação:** Após a escolha do horário, PERGUNTE para confirmar: "Posso confirmar seu agendamento para *[Procedimento]* na *[Dia da Semana], dia [Data]* às *[Hora]*?".
+5.  **Finalização:** SOMENTE APÓS o "sim" do usuário, chame `schedule_appointment`.
 
 ## REGRAS CRÍTICAS
-- SEPARAÇÃO: As ferramentas te darão DADOS BRUTOS. Transforme-os em resposta amigável e natural. NUNCA repita o texto da ferramenta.
-- SAUDAÇÃO: Se "É a primeira mensagem desta conversa" for "Sim", comece com uma saudação calorosa.
-- NOMES EXATOS: Use SEMPRE o nome exato do procedimento como retornado pelas ferramentas. Não modifique ou combine nomes.
-- ERROS: Se uma ferramenta retornar um ERRO, peça desculpas e diga que a equipe humana entrará em contato.
-- SEQUÊNCIA: NUNCA pule etapas do fluxo de agendamento. Isso é CRÍTICO!
-
-## EXEMPLOS DO FLUXO DE AGENDAMENTO
-### Exemplo 1 - Verificação e coleta
-Paciente: "Quero agendar uma consulta"
-Assistente: [chama check_onboarding_status]
-Sistema: "STATUS: CADASTRO_INCOMPLETO; FALTANDO: nome_completo, email"
-Assistente: "Claro! Precisamos completar seu cadastro. Qual é o seu nome completo?"
-Paciente: "Maria Silva Santos"
-Assistente: [chama update_patient_info com full_name="Maria Silva Santos"]
-...
-
-### Exemplo 2 - Confirmação e agendamento
-Paciente: "Quero o horário de 14:30"
-Assistente: "Posso confirmar seu agendamento para Limpeza na Quarta-feira, dia 23/06 às 14:30?"
-Paciente: "Sim, pode agendar"
-Assistente: [chama schedule_appointment com date_str="23 de junho", time_str="14:30", procedure="Limpeza"]
-Sistema: "AGENDAMENTO_SUCESSO: NOME: Maria; PROCEDIMENTO: Limpeza; DATA_HORA: Quarta-feira, 23/06/2025 às 14:30"
-Assistente: "Ótimo, Maria! Seu agendamento para Limpeza foi confirmado para quarta-feira, 23 de junho, às 14:30. Esperamos você em nossa clínica!"
-
-## VERIFICAÇÃO FINAL ANTES DE CHAMAR FUNÇÕES:
-Antes de chamar qualquer função, verifique:
-1. Você está seguindo a ordem correta do fluxo?
-2. Você completou a etapa anterior completamente?
-3. Para `schedule_appointment`: o usuário deu confirmação EXPLÍCITA?
-'''
+- **SEPARAÇÃO DE TAREFAS:** As ferramentas te darão DADOS BRUTOS. Sua única função é transformar esses dados em uma resposta amigável. NUNCA repita o texto da ferramenta.
+- **SAUDAÇÃO INICIAL:** Se "É a primeira mensagem desta conversa" for "Sim", comece com uma saudação calorosa.
+- **ERROS:** Se uma ferramenta retornar um ERRO, peça desculpas e diga que a equipe humana entrará em contato.
+"""
     history = db.query(HistoricoConversa).filter(HistoricoConversa.paciente_id == patient.id).order_by(HistoricoConversa.timestamp.desc()).limit(15).all()
     messages = [{"role": "system", "content": system_prompt}] + [{"role": msg.role, "content": msg.content} for msg in reversed(history)]
 
     try:
         final_answer = ""
+        # Usando Claude 3 Haiku para melhor seguimento de regras
+        response_model = "anthropic/claude-3-haiku-20240307"
+
         for _ in range(5):
-            response = openrouter_chat_completion(
-                model="google/gemini-2.5-flash", 
-                messages=messages, 
-                tools=TOOLS_DEFINITION, 
-                tool_choice="auto",
-                temperature=0.2  # Valor mais baixo para seguir regras com mais precisão
-            )
+            response = openrouter_chat_completion(model=response_model, messages=messages, tools=TOOLS_DEFINITION, tool_choice="auto", temperature=0.1)
             ai_message = response.choices[0].message
             messages.append(ai_message)
             if not ai_message.tool_calls: final_answer = ai_message.content; break
@@ -348,7 +310,9 @@ Antes de chamar qualquer função, verifique:
                 print(f"🤖 IA -> Ferramenta: {func_name}({func_args})", flush=True)
 
                 if func_to_call := AVAILABLE_TOOLS.get(func_name):
-                    if func_name in ["schedule_appointment", "cancel_appointment", "update_patient_info", "check_onboarding_status"]: func_args['patient_id'] = patient.id
+                    # Adiciona 'patient_id' automaticamente para funções que precisam dele
+                    if func_name in ["get_my_appointment_details", "schedule_appointment", "cancel_appointment", "update_patient_info", "check_onboarding_status"]:
+                        func_args['patient_id'] = patient.id
                     tool_result = func_to_call(db=db, **func_args)
                 else: tool_result = f"ERRO: Ferramenta '{func_name}' não encontrada."
                 messages.append({"tool_call_id": tool_call.id, "role": "tool", "name": func_name, "content": tool_result})
@@ -368,3 +332,4 @@ async def send_zapi_message(phone: str, message: str):
     async with httpx.AsyncClient() as client:
         try: await client.post(url, json=payload, headers=headers, timeout=30)
         except Exception as e: print(f"🚨 Falha ao enviar mensagem para Z-API ({phone}): {e}", flush=True)
+
