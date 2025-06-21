@@ -1,5 +1,5 @@
 # OdontoBot AI – main.py – v16.3.3-FlowControl
-────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────
 • CONTROLE DE FLUXO (CRÍTICO): O prompt do sistema foi completamente reescrito para 
   garantir que a IA siga estritamente o fluxo de agendamento e nunca pule etapas.
 • EXEMPLOS CONCRETOS: Adicionados exemplos de diálogo completo mostrando como 
